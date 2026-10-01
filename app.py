@@ -1671,37 +1671,39 @@ def list_accounts(_=Depends(admin_auth)):
 
 @app.post("/admin/accounts")
 def add_account(req: AccountRequest, _=Depends(admin_auth)):
-    added: list[dict] = []
-    seen: list[dict] = []          # 本次导入的所有 cookie，用来检查核心项是否齐全
-
+    pending = []
     if req.batch:
-        for label, cookies in parse_batch(req.batch):
-            acc = store.add_account(cookies, label)
-            seen.append(cookies)
-            added.append({"id": acc["id"], "label": acc["label"],
-                          "cookie_count": len(cookies),
-                          "expires_at": acc.get("expires_at")})
-
+        pending.extend((label, cookies, {}) for label, cookies in parse_batch(req.batch))
     cookies = dict(req.cookies)
+    label = req.label
     if req.cookie_header:
-        cookies.update(parse_cookie_text(req.cookie_header))
+        text = req.cookie_header.strip()
+        # The clipboard/export format also permits a label on a single account.
+        # Do not treat "label | hatch_sess" as a cookie name.
+        if "|" in text:
+            prefix, tail = text.split("|", 1)
+            if "=" not in prefix and "\n" not in prefix:
+                label = label or prefix.strip()
+                text = tail.strip()
+        if text.lower().startswith("cookie:"):
+            text = text[7:].strip()
+        cookies.update(parse_cookie_text(text))
     if cookies:
-        acc = store.add_account(cookies, req.label, cookies_exp=req.expires)
-        seen.append(cookies)
+        pending.append((label, cookies, req.expires))
+    if not pending:
+        raise HTTPException(400, "未解析到 Cookie。请粘贴完整 Cookie 字符串，或使用导号工具。")
+    # Validate every record before writing any, so a failed batch is not partially
+    # imported. Errors name only missing fields, never repeat submitted values.
+    for index, (_, values, _) in enumerate(pending, 1):
+        missing = [name for name in ESSENTIAL_COOKIES if not values.get(name, "").strip()]
+        if missing:
+            raise HTTPException(400, f"第 {index} 个账号缺少必要 Cookie：{', '.join(missing)}。请重新复制完整 Cookie。")
+    added = []
+    for label, values, expires in pending:
+        acc = store.add_account(values, label, cookies_exp=expires)
         added.append({"id": acc["id"], "label": acc["label"],
-                      "cookie_count": len(cookies),
-                      "expires_at": acc.get("expires_at")})
-
-    if not added:
-        raise HTTPException(400, "未解析到任何 cookie，请检查格式")
-
-    # 只要有一个账号把核心 cookie 凑齐就算通过（批量时按整体判断）
-    missing = [n for n in ESSENTIAL_COOKIES
-               if not any(n in c for c in seen)]
-    return {"added": added, "count": len(added),
-            "essential_missing": missing,
-            "warning": (f"缺少核心 cookie：{', '.join(missing)}，该账号可能无法生成"
-                        if missing else "")}
+                      "cookie_count": len(values), "expires_at": acc.get("expires_at")})
+    return {"added": added, "count": len(added), "essential_missing": [], "warning": ""}
 
 
 @app.patch("/admin/accounts/{aid}")

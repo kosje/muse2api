@@ -30,6 +30,7 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "data" / "media" / "fixture.mp4").write_bytes(b"fixture")
     (tmp_path / "data" / "accounts.json").write_text('SECRET COOKIE')
     (tmp_path / "install.conf").write_text('SECRET KEY')
+    monkeypatch.setattr(app, "store", app.Store(app.CFG))
     # Do not start browser/keepalive background tasks.
     return TestClient(app.app)
 
@@ -62,6 +63,39 @@ def test_no_code_update_endpoints(client):
     for path in ("/admin/update/upgrade", "/admin/repo/pull", "/admin/repo/push"):
         assert client.post(path, headers=ADMIN, json={}).status_code == 404
     assert client.get("/admin/update/check", headers=ADMIN).status_code == 404
+
+
+def test_import_prefixed_cookie_and_explicit_label(client):
+    values={name:'fixture-'+name for name in app.ESSENTIAL_COOKIES}
+    raw='export-label | '+ '; '.join(name+'='+value for name,value in values.items())
+    response=client.post('/admin/accounts',headers=ADMIN,json={'label':'UI label','cookie_header':raw})
+    assert response.status_code==200
+    added=response.json()['added'][0]
+    account=app.store.get_account(added['id'])
+    assert account['label']=='UI label'
+    assert account['cookies']==values
+    assert not any(value in response.text for value in values.values())
+    response=client.post('/admin/accounts',headers=ADMIN,json={'cookie_header':raw})
+    assert response.json()['added'][0]['label']=='export-label'
+
+
+def test_import_missing_cookies_never_writes_partial_accounts(client):
+    raw='hatch_sess=do-not-echo-this-secret'
+    response=client.post('/admin/accounts',headers=ADMIN,json={'cookie_header':raw})
+    assert response.status_code==400
+    assert 'hatch_gw' in response.json()['detail']
+    assert 'do-not-echo-this-secret' not in response.text
+    valid='; '.join(name+'=fixture' for name in app.ESSENTIAL_COOKIES)
+    response=client.post('/admin/accounts',headers=ADMIN,json={'batch':'valid | '+valid+'\ninvalid | '+raw})
+    assert response.status_code==400
+    assert app.store.list_accounts()==[]
+
+
+def test_import_raw_cookie_and_helper_payload(client):
+    values={name:'fixture' for name in app.ESSENTIAL_COOKIES}
+    raw='Cookie: '+ '; '.join(name+'='+value for name,value in values.items())
+    assert client.post('/admin/accounts',headers=ADMIN,json={'cookie_header':raw}).status_code==200
+    assert client.post('/admin/accounts',headers=ADMIN,json={'cookies':values}).status_code==200
 
 
 def test_media_auth_and_scoped_cookie(client):

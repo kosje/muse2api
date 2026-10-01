@@ -3,7 +3,7 @@
 <h1>Muse 管理</h1><a href="/">视频工作台</a>
 <section><label>管理员 Key<input id="key" type="password" autocomplete="off"></label><button id="connect">连接</button><button id="logout">退出</button><p>Key 只保存在当前标签页会话中。</p><p id="message" role="status"></p></section>
 <section><h2>客户端接入</h2><p id="base"></p><label>生成接口 Key<input id="apiKey" type="password" readonly></label><button id="show">显示/隐藏</button><button id="rotate">更换生成接口 Key</button><button id="rotateAdmin">更换管理员 Key</button></section>
-<section><h2>导入账号</h2><label>标签<input id="label" maxlength="100"></label><label>muse.ai Cookie<textarea id="cookies" rows="4" autocomplete="off"></textarea></label><button id="add">导入</button><button id="helper">下载导号工具</button><p>导号工具填写此站点地址和管理员 Key。仅使用 HTTPS 或本机 SSH 隧道。</p></section>
+<section><h2>导入账号</h2><label>标签<input id="label" maxlength="100"></label><label>muse.ai Cookie<textarea id="cookies" rows="4" autocomplete="off" placeholder="hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=...&#10;也支持：标签 | Cookie 字符串"></textarea></label><button id="add">导入</button><button id="helper">下载导号工具</button><p id="importMessage" role="status" aria-live="polite"></p><p>导号工具填写此站点地址和管理员 Key。仅使用 HTTPS 或本机 SSH 隧道。</p></section>
 <section><h2>账号池</h2><button id="refresh">刷新</button><table><thead><tr><th>标签</th><th>状态</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></section>
 <section><h2>生成文件</h2><button id="media">加载</button><div id="files"></div></section>
 <script>
@@ -12,7 +12,18 @@ const $=id=>document.getElementById(id),storage='muse_admin_session';
 let key=sessionStorage.getItem(storage)||'';$('key').value=key;$('base').textContent=location.origin+'/v1';
 localStorage.removeItem('muse2api_key');if(location.search)history.replaceState(null,'',location.pathname);
 const message=t=>{$('message').textContent=t;};
-async function api(path,body,method){const r=await fetch(path,{method:method||(body?'POST':'GET'),headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok)throw Error('请求失败（HTTP '+r.status+'）');return r.json();}
+async function api(path,body,method){
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),/\/(?:test|quota|keepalive)$/.test(path)?180000:15000);
+ try{
+  const r=await fetch(path,{method:method||(body?'POST':'GET'),headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,signal:controller.signal});
+  let data;try{data=await r.json();}catch(e){if(e.name==='AbortError')throw e;throw Error('服务器返回异常，请确认 SSH 隧道和页面地址。');}
+  if(!r.ok){
+   if(r.status===401||r.status===403)throw Error('管理员 Key 无效或尚未连接，请在页面顶部填写管理员 Key 并点击“连接”。');
+   throw Error(typeof data.detail==='string'?data.detail:'请求失败（HTTP '+r.status+'）');
+  }
+  return data;
+ }catch(e){if(e.name==='AbortError')throw Error('请求超时：请检查 SSH 隧道是否断线，恢复后先刷新账号池确认是否已导入。');if(e instanceof TypeError)throw Error('连接中断：请检查 SSH 隧道后重试。');throw e;}finally{clearTimeout(timer);}
+}
 function action(id,fn){$(id).onclick=async()=>{try{await fn();}catch(e){message(e.message);}};}
 async function session(){await api('/v1/media/session',{});}
 async function refresh(){
@@ -26,7 +37,17 @@ action('logout',async()=>{key='';sessionStorage.removeItem(storage);$('key').val
 action('refresh',refresh);action('show',async()=>{$('apiKey').type=$('apiKey').type==='password'?'text':'password';});
 action('rotate',async()=>{if(confirm('旧生成接口 Key 将立即失效，继续？')){$('apiKey').value=(await api('/admin/apikey/rotate',{})).api_key;message('已更换，请更新客户端配置。');}});
 action('rotateAdmin',async()=>{if(confirm('旧管理员 Key 将立即失效，继续？')){key=(await api('/admin/adminkey/rotate',{})).admin_key;sessionStorage.setItem(storage,key);$('key').value=key;await session();message('管理员 Key 已更换。服务器端可运行 install.sh --credentials 查看。');}});
-action('add',async()=>{await api('/admin/accounts',{label:$('label').value,cookie_header:$('cookies').value});$('cookies').value='';await refresh();message('已导入');});
+action('add',async()=>{
+ const button=$('add'),status=$('importMessage');
+ if(!key){status.textContent='请先在页面顶部填写管理员 Key 并点击“连接”。';return;}
+ const raw=$('cookies').value.trim();if(!raw){status.textContent='请先粘贴 Cookie。';return;}
+ button.disabled=true;button.textContent='正在导入…';status.textContent='正在提交账号，请稍候…';
+ try{
+  const result=await api('/admin/accounts',{label:$('label').value.trim(),cookie_header:raw});
+  $('cookies').value='';status.textContent='导入成功：'+result.count+' 个账号。';
+  try{await refresh();}catch(e){status.textContent+=' 账号池刷新失败，请点击“刷新”确认；无需重复导入。';}
+ }catch(e){status.textContent=e.message;}finally{button.disabled=false;button.textContent='导入';}
+});
 action('helper',async()=>{const r=await fetch('/admin/cookie-helper?download=1',{headers:{Authorization:'Bearer '+key}});if(!r.ok)throw Error('下载失败');const u=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=u;a.download='get_muse_cookie.py';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);});
 action('media',async()=>{await session();const r=await api('/admin/media');$('files').replaceChildren();for(const m of r.media){const u=new URL(m.url,location.origin);if(u.origin!==location.origin||!u.pathname.startsWith('/v1/media/'))continue;const el=document.createElement('article'),p=document.createElement('p'),v=document.createElement(m.kind==='video'?'video':'img'),a=document.createElement('a');p.textContent=m.name;v.src=u.href;if(m.kind==='video')v.controls=true;a.href=u.href;a.download=m.name;a.textContent='下载';el.append(p,v,document.createElement('br'),a);$('files').append(el);}});
 setInterval(()=>{if(key)session().catch(()=>{});},300000);if(key)refresh().catch(e=>message(e.message));
