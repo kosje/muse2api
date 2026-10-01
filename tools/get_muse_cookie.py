@@ -14,21 +14,21 @@
       4. 问你「还要再导入一个吗？」—— 想加就按 y，会再弹一个干净窗口，
          登录另一个 muse.ai 账号即可。一直加到你按 n 为止。
 
-  首次运行会记住地址和 Key（存在 ~/.muse2api-import.json），
-  第二次起直接回车两次就完事。
+  首次运行只记住服务器地址（存在 ~/.muse2api-import.json），不保存 Key。
+  每次需要输入管理员 Key，或通过 MUSE2API_ADMIN_KEY 环境变量提供。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   进阶用法（给脚本/批量用，全自动不交互）：
 
-      python get_muse_cookie.py --base http://1.2.3.4:18610 --key m2a_xxx
+      python get_muse_cookie.py --base http://127.0.0.1:18610 --key m2a_xxx
       python get_muse_cookie.py --base ... --key ... --count 3   # 连续导 3 个
       python get_muse_cookie.py --list                           # 看账号池现状
       python get_muse_cookie.py --remove <账号ID或标签>            # 删一个账号
       python get_muse_cookie.py --from-clipboard                  # 剪贴板兜底
 
   也可以用环境变量，省得每次敲：
-      set MUSE2API_BASE=http://1.2.3.4:18610     (Windows)
-      set MUSE2API_KEY=m2a_xxx
+      set MUSE2API_BASE=http://127.0.0.1:18610     (Windows)
+      set MUSE2API_ADMIN_KEY=m2a_xxx
       export MUSE2API_BASE=...                   (macOS / Linux)
 
 只依赖 Python 标准库（Python 3.8+），不需要 pip install 任何东西。
@@ -775,8 +775,8 @@ def normalize_base(s: str) -> str:
     ⚠️ 必须做全的三件事（早期版本只做了最后一件，导致实测翻车）：
       1. 协议头统一成小写：`HTTP://1.2.3.4` 要变 `http://1.2.3.4`。
          大写协议在有些 HTTP 客户端/代理上会被拒，而且显示出来很怪。
-      2. 去掉**所有**尾部斜杠与路径：`http://1.2.3.4:18610///` 要变
-         `http://1.2.3.4:18610`。早期版本只 rstrip 一次，于是
+      2. 去掉**所有**尾部斜杠与路径：`http://127.0.0.1:18610///` 要变
+         `http://127.0.0.1:18610`。早期版本只 rstrip 一次，于是
          `...///` 变成一个带路径的地址，拿去做 `...///admin/accounts`
          请求会 404 或返回空 —— 但自检还显示「连接正常」（因为状态码不是
          401/403/404 里被识别的那几个），小白完全查不出来。
@@ -791,7 +791,7 @@ def normalize_base(s: str) -> str:
         scheme = m.group(1).lower()
         rest = s[m.end():]
     else:
-        scheme = "http"
+        scheme = "http" if s.startswith(("127.0.0.1", "[::1]")) else "https"
         rest = s
     # 只保留主机[:端口] 部分，路径/查询/锚点一律丢掉
     rest = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
@@ -1025,7 +1025,7 @@ def main() -> int:
             "  python get_muse_cookie.py --remove acc-02      删掉某个账号\n"
             "  python get_muse_cookie.py --from-clipboard     从剪贴板导入（浏览器打不开时）\n"
         ))
-    ap.add_argument("--base", default="", help="muse2api 地址，如 http://1.2.3.4:18610")
+    ap.add_argument("--base", default="", help="muse2api 地址，如 http://127.0.0.1:18610")
     ap.add_argument("--key", default="", help="管理员 Key（m2a_ 开头）")
     ap.add_argument("--label", default="", help="账号标签，如 acc-01（不给就自动取邮箱）")
     ap.add_argument("--count", type=int, default=0,
@@ -1096,7 +1096,7 @@ def main() -> int:
                            or os.environ.get("MUSE2API_BASE", "")
                            or conf.get("base", "")).strip())
     key = (args.key
-           or os.environ.get("MUSE2API_KEY", "")
+           or os.environ.get("MUSE2API_ADMIN_KEY", "")
            or "").strip().strip('"').strip("'")
 
     # ⚠️ Key 里夹了换行/空格时，光 strip 两端不够 —— 中间的空格一定是粘贴事故，
@@ -1115,7 +1115,7 @@ def main() -> int:
         #    ⚠️ 重试次数在「非交互」环境里必须是 1：那里根本没人能回答，
         #       重试 5 次只会把同一段报错刷 5 遍（实测见过的画面），
         #       小白只会更慌。非交互时第一次拿不到就停下，直接教他怎么用。
-        hint = base or "1.2.3.4:18610"
+        hint = base or "127.0.0.1:18610"
         _maxtry = 5 if sys.stdin.isatty() else 1
         for _try in range(_maxtry):
             raw = ask(f"  服务器地址（形如 {hint}）", base)
@@ -1124,12 +1124,12 @@ def main() -> int:
                 break
             say(f"  {_BAD_MARK} 「{raw}」看着不像一个地址。")
             say("    正确样子（任选其一）：")
-            say("      1.2.3.4:18610")
+            say("      127.0.0.1:18610")
             say("      video.example.com")
             say("      https://my-domain.com")
             say("    （IP 和端口之间的冒号别漏了；端口一般是 18610）")
             base = ""          # 清掉，逼着重填，别拿旧的顶上
-            hint = "1.2.3.4:18610"
+            hint = "127.0.0.1:18610"
         else:
             if sys.stdin.isatty():
                 say(f"  {_BAD_MARK} 试了 5 次都不是地址，先退出了。重跑一次慢慢来：")
@@ -1141,7 +1141,7 @@ def main() -> int:
                 say("    想让它问你，请在自己的电脑上直接双击运行，或在这个窗口敲：")
                 say("        python get_muse_cookie.py")
                 say("    想一条命令跑完，把地址和 Key 直接写在命令里：")
-                say("        python get_muse_cookie.py --base http://1.2.3.4:18610 --key m2a_xxx")
+                say("        python get_muse_cookie.py --base http://127.0.0.1:18610 --key m2a_xxx")
             return 2
 
         # ⚠️ Key 这一段的写法很讲究，早期版本有个很坑的显示 bug：
@@ -1153,13 +1153,13 @@ def main() -> int:
         #    Key —— 和之前修的「地址静默沿用」是同一类错误。
         #    正解：把「沿用 / 重填」讲成一句话，让人一眼看清用的哪个 Key。
         if key:
-            say(f"  这个 Key 我还记着：{key[:12]}…")
+            say("  管理员 Key：已填写（隐藏）")
             say(f"  {_OK_MARK} 直接回车就用它；想换一个就现在粘贴新的。")
             typed = ask_secret("  管理员 Key（回车沿用）：")
             if typed:
                 key = re.sub(r"\s+", "", typed.strip().strip('"').strip("'"))
             else:
-                say(f"  {_OK_MARK} 沿用 {key[:12]}…")
+                say("  管理员 Key：已填写（隐藏）")
         else:
             say("  管理员 Key 是 m2a_ 开头的一长串，直接粘贴回来即可。")
             say("  （在你的服务器上跑 `bash install.sh --credentials` 能看到）")
@@ -1172,11 +1172,11 @@ def main() -> int:
                 return 2
     else:
         say(f"  服务器：{base}")
-        say(f"  管理员 Key：{key[:12]}…")
+        say("  管理员 Key：已填写（隐藏）")
 
     if not base or not key:
         say(f"  {_BAD_MARK} 地址或 Key 是空的，没法继续。")
-        say("    手动指定：python get_muse_cookie.py --base http://1.2.3.4:18610 --key m2a_xxx")
+        say("    手动指定：python get_muse_cookie.py --base http://127.0.0.1:18610 --key m2a_xxx")
         return 2
 
     # ---- 连通性自检（小白最容易在这里翻车，提前拦住并说清楚）
@@ -1367,7 +1367,7 @@ def print_accounts(accts: list[dict], base: str) -> None:
         say()
         say("    想一口气加几个：python get_muse_cookie.py --count 3")
         return
-    say(f"  共 {len(accts)} 个账号。管理页面：{base}/admin?key=<你的Key>")
+    say(f"  共 {len(accts)} 个账号。管理页面：{base}/admin")
 
 
 if __name__ == "__main__":

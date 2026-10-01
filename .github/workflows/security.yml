@@ -38,6 +38,8 @@ jobs:
           done
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18610/admin/accounts)" = 401
           test "$(docker exec muse-security-test id -u)" = 10001
+          docker cp tests/test_web_ui.py muse-security-test:/tmp/test_web_ui.py
+          docker exec -e PYTHONPATH=/app muse-security-test python /tmp/test_web_ui.py
           docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:rw,nosuid,nodev,size=512m --shm-size=1g \
             -e PYTHONPATH=/app -v "$PWD/tests:/tests:ro" muse-security-test \

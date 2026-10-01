@@ -141,12 +141,26 @@ class _PinnedHTTP(http.client.HTTPConnection):
         self.sock = socket.create_connection((self.address, self.port), self.timeout)
         if self.tls:
             self.sock = ssl.create_default_context().wrap_socket(self.sock, server_hostname=self.host)
+        self.download_socket = self.sock
+
+    def abort(self):
+        sock = getattr(self, "download_socket", self.sock)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
 
 
 def download_image(url):
     parts, host, port, address = public_target(url)
     conn = _PinnedHTTP(host, port, address, parts.scheme == "https")
     deadline = time.monotonic() + 20
+    # Socket read timeouts alone do not bound slowly trickling HTTP headers.
+    timer = threading.Timer(20, conn.abort)
+    timer.daemon = True
+    timer.start()
     try:
         target = parts.path or "/"
         if parts.query:
@@ -178,4 +192,5 @@ def download_image(url):
             raise ValueError("Empty remote image")
         return bytes(data), mime
     finally:
+        timer.cancel()
         conn.close()

@@ -166,6 +166,7 @@ def test_download_rejects_redirect_mime_and_size(monkeypatch,status,mime,length,
         def request(self,*a,**kw): pass
         def getresponse(self): return Response()
         def close(self): pass
+        def abort(self): pass
     monkeypatch.setattr(security,"_PinnedHTTP",Connection)
     with pytest.raises(ValueError): security.download_image("https://image.example/a")
 
