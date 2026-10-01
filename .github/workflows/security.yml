@@ -40,5 +40,5 @@ jobs:
           test "$(docker exec muse-security-test id -u)" = 10001
           docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:rw,nosuid,nodev,size=512m --shm-size=1g \
-            -v "$PWD/tests:/tests:ro" muse-security-test \
+            -e PYTHONPATH=/app -v "$PWD/tests:/tests:ro" muse-security-test \
             python /tests/test_media_selection.py /app/engine.py
