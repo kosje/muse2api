@@ -176,6 +176,37 @@ def test_no_local_file_reference(tmp_path):
     with pytest.raises(MuseGenerationError): MuseEngine._normalize_image(str(f))
 
 
+def test_slow_http_headers_have_total_deadline(monkeypatch):
+    import socketserver
+    import threading
+    import time
+    from urllib.parse import urlsplit
+    class Slow(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            try:
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                for _ in range(100):
+                    self.request.sendall(b"a")
+                    time.sleep(.02)
+            except OSError:
+                pass
+    server=socketserver.ThreadingTCPServer(('127.0.0.1',0),Slow)
+    server.daemon_threads=True
+    worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+    real_timer=threading.Timer
+    monkeypatch.setattr(security.threading,'Timer',lambda seconds,fn:real_timer(.15,fn))
+    port=server.server_address[1]
+    monkeypatch.setattr(security,'public_target',lambda url:(urlsplit(url),'127.0.0.1',port,'127.0.0.1'))
+    started=time.monotonic()
+    try:
+        with pytest.raises((ValueError,OSError,security.http.client.HTTPException)):
+            security.download_image('http://fixture.example/image')
+        assert time.monotonic()-started < 1.5
+    finally:
+        server.shutdown();server.server_close()
+
+
 def test_cookie_helper_transport():
     spec=importlib.util.spec_from_file_location('cookie_helper',ROOT/'tools/get_muse_cookie.py')
     helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
