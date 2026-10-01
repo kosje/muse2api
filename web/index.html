@@ -211,7 +211,15 @@
   var state = { base:'', key:'', size:'16:9', firstFrame:null, busy:false,
                 timer:null, taskId:null, tasks:[] };
   var curDur = 5;
-  setInterval(function(){ if(state.key) fetch(api('/v1/media/session'), {method:'POST', headers:headers()}); }, 300000);
+  setInterval(function(){ if(state.key) mediaSession().catch(function(){setStatus('off','连接中断');}); }, 300000);
+  async function mediaSession(){
+    var controller=new AbortController(), timer=setTimeout(function(){controller.abort();},15000);
+    try{
+      var r=await fetch(api('/v1/media/session'),{method:'POST',headers:headers(),signal:controller.signal});
+      if(!r.ok) throw new Error(r.status===401?'媒体鉴权失败，请检查生成接口 Key。':'媒体服务请求失败（HTTP '+r.status+'）。');
+    }catch(e){if(e.name==='AbortError') throw new Error('媒体读取超时，请检查 SSH 隧道。');throw e;}
+    finally{clearTimeout(timer);}
+  }
 
   function toast(m){ var t=$('toast'); t.textContent=m; t.classList.add('show');
     clearTimeout(t._h); t._h=setTimeout(function(){t.classList.remove('show');},2600); }
@@ -282,8 +290,10 @@
 
   async function showTask(t){
     var area=$('taskArea'); $('taskHint').textContent=t.id||'';
+    clearTimeout(state.mediaTimer);
     if(t.status==='completed'&&t.url){
-      await fetch(api('/v1/media/session'), {method:'POST', headers:headers()});
+      area.innerHTML='<div class="prog-note">视频已生成，正在连接媒体服务…</div>';
+      try{await mediaSession();}catch(e){area.innerHTML='<div class="prog-note err">'+esc(e.message)+' 视频已保存，请恢复连接后重新打开这条历史记录。</div>';setStatus('off','连接中断');return;}
       var abs=new URL(t.url, location.origin);
       if(abs.origin!==location.origin || !abs.pathname.startsWith('/v1/media/')) { toast('无效的媒体地址'); return; }
       abs=esc(abs.href);
@@ -293,7 +303,11 @@
         '<a href="'+abs+'" download target="_blank" rel="noopener"><button class="btn btn-ghost">下载视频</button></a>'+
         '<a href="'+abs+'" target="_blank" rel="noopener"><button class="btn btn-ghost">新窗口打开</button></a>'+
         '</div></div><div class="prog-note" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">'+
-        esc(t.prompt||'')+'</div>';
+        esc(t.prompt||'')+'</div><div class="prog-note err" id="playbackFeedback" role="status"></div>';
+      var video=area.querySelector('video'), feedback=$('playbackFeedback');
+      video.onerror=function(){feedback.textContent='视频读取失败，请检查 SSH 隧道或尝试下载播放。已生成文件会保留。';};
+      video.onloadedmetadata=function(){clearTimeout(state.mediaTimer);feedback.textContent='';};
+      state.mediaTimer=setTimeout(function(){if(video.readyState===0)feedback.textContent='视频加载较慢，请检查 SSH 隧道。可恢复连接后重新打开这条历史记录，无需再次生成。';},15000);
       return;
     }
     if(t.status==='failed'){

@@ -55,6 +55,18 @@ with tempfile.TemporaryDirectory(prefix='muse-ui-') as tmp:
         assert page.js("document.getElementById('importMessage').textContent.includes('SSH') && !document.getElementById('add').disabled"), 'Stalled tunnel did not recover import button'
         page.js("window.fetch=realFetch;window.setTimeout=realTimeout;")
         print('PASS prefixed cookie import, inline validation and stalled-tunnel timeout')
+        page.js("document.getElementById('media').click()")
+        for _ in range(50):
+            if page.js("document.getElementById('mediaMessage').textContent.includes('还没有生成文件')"):break
+            time.sleep(.1)
+        assert page.js("document.getElementById('mediaMessage').textContent.includes('还没有生成文件') && !document.getElementById('media').disabled")
+        page.js("window.fetch=(url,options)=>url==='/admin/media'?Promise.resolve(new Response(JSON.stringify({detail:'fixture media failure'}),{status:503,headers:{'Content-Type':'application/json'}})):realFetch(url,options);document.getElementById('media').click()")
+        for _ in range(50):
+            if page.js("document.getElementById('mediaMessage').textContent.includes('fixture media failure')"):break
+            time.sleep(.1)
+        assert page.js("document.getElementById('mediaMessage').textContent.includes('fixture media failure') && !document.getElementById('media').disabled")
+        page.js("window.fetch=realFetch;")
+        print('PASS media loading feedback and inline failure reporting')
         page.send('Page.navigate',{'url':'http://127.0.0.1:18610/'})
         for _ in range(50):
             if page.js("Boolean(document.getElementById('apiKey'))"):break

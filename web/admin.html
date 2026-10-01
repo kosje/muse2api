@@ -5,7 +5,7 @@
 <section><h2>客户端接入</h2><p id="base"></p><label>生成接口 Key<input id="apiKey" type="password" readonly></label><button id="show">显示/隐藏</button><button id="rotate">更换生成接口 Key</button><button id="rotateAdmin">更换管理员 Key</button></section>
 <section><h2>导入账号</h2><label>标签<input id="label" maxlength="100"></label><label>muse.ai Cookie<textarea id="cookies" rows="4" autocomplete="off" placeholder="hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=...&#10;也支持：标签 | Cookie 字符串"></textarea></label><button id="add">导入</button><button id="helper">下载导号工具</button><p id="importMessage" role="status" aria-live="polite"></p><p>导号工具填写此站点地址和管理员 Key。仅使用 HTTPS 或本机 SSH 隧道。</p></section>
 <section><h2>账号池</h2><button id="refresh">刷新</button><table><thead><tr><th>标签</th><th>状态</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></section>
-<section><h2>生成文件</h2><button id="media">加载</button><div id="files"></div></section>
+<section><h2>生成文件</h2><button id="media">加载</button><p id="mediaMessage" role="status" aria-live="polite"></p><div id="files"></div></section>
 <script>
 'use strict';
 const $=id=>document.getElementById(id),storage='muse_admin_session';
@@ -49,6 +49,10 @@ action('add',async()=>{
  }catch(e){status.textContent=e.message;}finally{button.disabled=false;button.textContent='导入';}
 });
 action('helper',async()=>{const r=await fetch('/admin/cookie-helper?download=1',{headers:{Authorization:'Bearer '+key}});if(!r.ok)throw Error('下载失败');const u=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=u;a.download='get_muse_cookie.py';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);});
-action('media',async()=>{await session();const r=await api('/admin/media');$('files').replaceChildren();for(const m of r.media){const u=new URL(m.url,location.origin);if(u.origin!==location.origin||!u.pathname.startsWith('/v1/media/'))continue;const el=document.createElement('article'),p=document.createElement('p'),v=document.createElement(m.kind==='video'?'video':'img'),a=document.createElement('a');p.textContent=m.name;v.src=u.href;if(m.kind==='video')v.controls=true;a.href=u.href;a.download=m.name;a.textContent='下载';el.append(p,v,document.createElement('br'),a);$('files').append(el);}});
+action('media',async()=>{
+ const button=$('media'),status=$('mediaMessage');button.disabled=true;button.textContent='正在加载…';status.textContent='正在获取文件列表…';
+ try{await session();const r=await api('/admin/media');$('files').replaceChildren();for(const m of r.media){const u=new URL(m.url,location.origin);if(u.origin!==location.origin||!u.pathname.startsWith('/v1/media/'))continue;const el=document.createElement('article'),p=document.createElement('p'),v=document.createElement(m.kind==='video'?'video':'img'),a=document.createElement('a');p.textContent=m.name;v.src=u.href;if(m.kind==='video')v.controls=true;v.onerror=()=>{status.textContent='文件列表已加载，但媒体读取失败。请检查 SSH 隧道；已生成文件会保留。';};a.href=u.href;a.download=m.name;a.textContent='下载';el.append(p,v,document.createElement('br'),a);$('files').append(el);}status.textContent=r.media.length?'已加载 '+r.media.length+' 个文件。':'还没有生成文件。';}
+ catch(e){status.textContent=e.message;}finally{button.disabled=false;button.textContent='加载';}
+});
 setInterval(()=>{if(key)session().catch(()=>{});},300000);if(key)refresh().catch(e=>message(e.message));
 </script></body></html>
