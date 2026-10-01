@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -95,7 +96,7 @@ class MuseEngine:
         self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
         cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
         self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
-                                     env=env, cwd=cwd_dir)
+                                     env=env, cwd=cwd_dir, start_new_session=(os.name != "nt"))
         last = None
         for _ in range(90):
             try:
@@ -108,17 +109,41 @@ class MuseEngine:
         raise MuseGenerationError(f"Chromium 启动失败: {last}")
 
     def stop(self):
+        # A browser owns renderer/helper children. Isolate its process group at
+        # launch and stop the whole group; waiting only for the parent can leave
+        # children writing the profile while the next browser is starting.
+        if self.browser and self.proc:
+            try:
+                self.browser.send("Browser.close", timeout=2)
+            except Exception:
+                pass
         for c in (self.page, self.browser):
             if c:
                 c.close()
         self.page = self.browser = None
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        if self.proc:
             try:
-                self.proc.wait(timeout=10)
-            except Exception:  # noqa: BLE001
+                if os.name != "nt":
+                    os.killpg(self.proc.pid, signal.SIGTERM)
+                elif self.proc.poll() is None:
+                    self.proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 self.proc.kill()
+            finally:
+                if os.name != "nt":
+                    try:
+                        os.killpg(self.proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                self.proc.wait(timeout=5)
         self.proc = None
+        if self._log:
+            self._log.close()
+            self._log = None
 
     # ---------------- 页面 ----------------
     def _open_page(self):
