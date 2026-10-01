@@ -29,7 +29,7 @@ class CDPTimeout(TimeoutError):
 
 class CDP:
     def __init__(self, ws_url: str, timeout: float = 90.0, max_size: int = 256 << 20):
-        self.ws = websocket.create_connection(ws_url, timeout=timeout, max_size=max_size)
+        self.ws = websocket.create_connection(ws_url, timeout=timeout, max_size=max_size, suppress_origin=True)
         self.timeout = timeout
         self._id = 0
 

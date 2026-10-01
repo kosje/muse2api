@@ -1,0 +1,33 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Muse 管理</title>
+<style>body{font:16px system-ui;max-width:960px;margin:32px auto;padding:0 20px;background:#f7f7f5;color:#23231f}section{padding:20px;background:white;border:1px solid #ddd;border-radius:12px;margin:20px 0}input,textarea,button{font:inherit;padding:10px;box-sizing:border-box;margin:5px 0}input,textarea{width:100%}button{cursor:pointer;margin-right:8px}td,th{padding:10px;text-align:left;border-bottom:1px solid #ddd}table{width:100%}video,img{max-width:100%;max-height:300px}article{border-top:1px solid #ddd;padding:15px 0}#message{white-space:pre-wrap}</style></head><body>
+<h1>Muse 管理</h1><a href="/">视频工作台</a>
+<section><label>管理员 Key<input id="key" type="password" autocomplete="off"></label><button id="connect">连接</button><button id="logout">退出</button><p>Key 只保存在当前标签页会话中。</p><p id="message" role="status"></p></section>
+<section><h2>客户端接入</h2><p id="base"></p><label>生成接口 Key<input id="apiKey" type="password" readonly></label><button id="show">显示/隐藏</button><button id="rotate">更换生成接口 Key</button><button id="rotateAdmin">更换管理员 Key</button></section>
+<section><h2>导入账号</h2><label>标签<input id="label" maxlength="100"></label><label>muse.ai Cookie<textarea id="cookies" rows="4" autocomplete="off"></textarea></label><button id="add">导入</button><button id="helper">下载导号工具</button><p>导号工具填写此站点地址和管理员 Key。仅使用 HTTPS 或本机 SSH 隧道。</p></section>
+<section><h2>账号池</h2><button id="refresh">刷新</button><table><thead><tr><th>标签</th><th>状态</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></section>
+<section><h2>生成文件</h2><button id="media">加载</button><div id="files"></div></section>
+<script>
+'use strict';
+const $=id=>document.getElementById(id),storage='muse_admin_session';
+let key=sessionStorage.getItem(storage)||'';$('key').value=key;$('base').textContent=location.origin+'/v1';
+localStorage.removeItem('muse2api_key');if(location.search)history.replaceState(null,'',location.pathname);
+const message=t=>{$('message').textContent=t;};
+async function api(path,body,method){const r=await fetch(path,{method:method||(body?'POST':'GET'),headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok)throw Error('请求失败（HTTP '+r.status+'）');return r.json();}
+function action(id,fn){$(id).onclick=async()=>{try{await fn();}catch(e){message(e.message);}};}
+async function session(){await api('/v1/media/session',{});}
+async function refresh(){
+ await session();$('apiKey').value=(await api('/admin/apikey')).api_key;
+ const r=await api('/admin/accounts');$('accounts').replaceChildren();
+ for(const a of r.accounts){const tr=document.createElement('tr');for(const v of [a.label,a.enabled?(a.ok===false?'需重新登录':'已启用'):'已停用']){const td=document.createElement('td');td.textContent=v;tr.append(td);}const td=document.createElement('td');
+ for(const [label,fn] of [['检查会话',async()=>{message('正在检查…');message((await api('/admin/accounts/'+encodeURIComponent(a.id)+'/test',{})).message||'完成');}],['删除',async()=>{if(confirm('删除此账号？')){await api('/admin/accounts/'+encodeURIComponent(a.id),null,'DELETE');await refresh();}}]]){const b=document.createElement('button');b.textContent=label;b.onclick=()=>fn().catch(e=>message(e.message));td.append(b);}tr.append(td);$('accounts').append(tr);}
+}
+action('connect',async()=>{key=$('key').value.trim();await refresh();sessionStorage.setItem(storage,key);message('已连接');});
+action('logout',async()=>{key='';sessionStorage.removeItem(storage);$('key').value='';$('apiKey').value='';$('accounts').replaceChildren();$('files').replaceChildren();await fetch('/v1/media/session',{method:'DELETE'});message('已退出');});
+action('refresh',refresh);action('show',async()=>{$('apiKey').type=$('apiKey').type==='password'?'text':'password';});
+action('rotate',async()=>{if(confirm('旧生成接口 Key 将立即失效，继续？')){$('apiKey').value=(await api('/admin/apikey/rotate',{})).api_key;message('已更换，请更新客户端配置。');}});
+action('rotateAdmin',async()=>{if(confirm('旧管理员 Key 将立即失效，继续？')){key=(await api('/admin/adminkey/rotate',{})).admin_key;sessionStorage.setItem(storage,key);$('key').value=key;await session();message('管理员 Key 已更换。服务器端可运行 install.sh --credentials 查看。');}});
+action('add',async()=>{await api('/admin/accounts',{label:$('label').value,cookie_header:$('cookies').value});$('cookies').value='';await refresh();message('已导入');});
+action('helper',async()=>{const r=await fetch('/admin/cookie-helper?download=1',{headers:{Authorization:'Bearer '+key}});if(!r.ok)throw Error('下载失败');const u=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=u;a.download='get_muse_cookie.py';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);});
+action('media',async()=>{await session();const r=await api('/admin/media');$('files').replaceChildren();for(const m of r.media){const u=new URL(m.url,location.origin);if(u.origin!==location.origin||!u.pathname.startsWith('/v1/media/'))continue;const el=document.createElement('article'),p=document.createElement('p'),v=document.createElement(m.kind==='video'?'video':'img'),a=document.createElement('a');p.textContent=m.name;v.src=u.href;if(m.kind==='video')v.controls=true;a.href=u.href;a.download=m.name;a.textContent='下载';el.append(p,v,document.createElement('br'),a);$('files').append(el);}});
+setInterval(()=>{if(key)session().catch(()=>{});},300000);if(key)refresh().catch(e=>message(e.message));
+</script></body></html>

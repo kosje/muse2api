@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import urllib.request
+from security import download_image, MAX_IMAGE_BYTES, IMAGE_TYPES
 import json
 import logging
 import os
@@ -68,7 +68,7 @@ class MuseEngine:
             "--autoplay-policy=no-user-gesture-required",
             "--window-size=1440,2400",
             f"--remote-debugging-port={self.cfg.cdp_port}",
-            "--remote-allow-origins=*",
+            "--remote-debugging-address=127.0.0.1",
             f"--user-data-dir={self.cfg.profile_dir}",
             "about:blank",
         ]
@@ -962,36 +962,31 @@ class MuseEngine:
 
     @staticmethod
     def _normalize_image(img: str) -> tuple[str, str]:
-        """将各种形态的图片输入归一为 (base64_str, mime_type)。"""
-        if not img:
-            return "", "image/png"
-        img = str(img).strip()
+        if not isinstance(img, str) or not img:
+            raise MuseGenerationError("Reference image is required")
+        img = img.strip()
+        if img.startswith(("https://", "http://")):
+            try:
+                data, mime = download_image(img)
+                return base64.b64encode(data).decode("ascii"), mime
+            except Exception:
+                raise MuseGenerationError("Remote image rejected or unavailable") from None
+        mime = "image/png"
         if img.startswith("data:"):
-            parts = img.split(",", 1)
-            mime = "image/png"
-            if ";" in parts[0]:
-                mime = parts[0].split(";")[0].replace("data:", "").strip()
-            return (parts[1].strip() if len(parts) > 1 else ""), mime
-        if img.startswith("http://") or img.startswith("https://"):
-            try:
-                req = urllib.request.Request(img, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    data = resp.read()
-                    mime = resp.headers.get_content_type() or "image/png"
-                    return base64.b64encode(data).decode("ascii"), mime
-            except Exception as e:
-                log.warning("下载远程参考图失败: %s", e)
-                return "", "image/png"
-        if os.path.isfile(img):
-            try:
-                with open(img, "rb") as f:
-                    data = f.read()
-                    mime = mimetypes.guess_type(img)[0] or "image/png"
-                    return base64.b64encode(data).decode("ascii"), mime
-            except Exception as e:
-                log.warning("读取本地参考图失败: %s", e)
-                return "", "image/png"
-        return img, "image/png"
+            head, sep, img = img.partition(",")
+            mime = head[5:].split(";", 1)[0].lower()
+            if not sep or not head.endswith(";base64") or mime not in IMAGE_TYPES:
+                raise MuseGenerationError("Unsupported image data URI")
+        if len(img) > MAX_IMAGE_BYTES * 2:
+            raise MuseGenerationError("Reference image too large")
+        try:
+            data = base64.b64decode(img, validate=True)
+        except Exception:
+            raise MuseGenerationError("Invalid base64 image") from None
+        if not data or len(data) > MAX_IMAGE_BYTES:
+            raise MuseGenerationError("Invalid image size")
+        # Local file paths are never accepted, even if they resemble base64.
+        return base64.b64encode(data).decode("ascii"), mime
 
     def _clear_attachments(self):
         """清除聊天输入框里遗留的附件缩略图。"""

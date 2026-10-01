@@ -48,6 +48,7 @@ from config import CFG
 from engine import ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError
 from scheduler import ST_DONE, ST_FAILED, ST_QUEUED, ST_RUNNING, ST_TIMEOUT, Scheduler
 from store import Store, account_expiry, min_expiry
+from security import Keyring
 
 import sys
 log = logging.getLogger("muse2api")
@@ -58,23 +59,17 @@ if not log.handlers:
     log.addHandler(_h)
 
 CFG.ensure_dirs()
-app = FastAPI(title="muse2api", version="1.5.2")
+KEYRING = Keyring(os.path.join(CFG.data_dir, "auth.json"), CFG.api_key, os.environ.get("MUSE2API_ADMIN_KEY", ""))
+app = FastAPI(title="muse2api", version="1.5.2-secure.1", docs_url=None, redoc_url=None, openapi_url=None)
 
-# Cookie 助手脚本从 muse.ai 页面发起导入请求，需要放行该来源；
-# 浏览器扩展从 chrome-extension:// 发起，也一并放行。
-#
-# 这里直接放行所有来源：本服务用 Bearer Key 鉴权、不依赖 Cookie，
-# 放行来源不会带来越权风险；反之如果把来源限死，浏览器端的智能体
-# （Open WebUI / LobeChat / 各种 Web 客户端）会被 CORS 拦住用不了。
-_origins = [o.strip() for o in (CFG.cors_origins or "").split(",") if o.strip()]
-from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-
-app.add_middleware(CORSMiddleware,
-                   allow_origins=["*"],
+# Browser clients use the same origin; opt-in CORS accepts explicit origins only.
+from fastapi.middleware.cors import CORSMiddleware
+_origins = [o.strip() for o in CFG.cors_origins.split(",") if o.strip()]
+if "*" in _origins:
+    raise ValueError("Wildcard CORS is disabled")
+app.add_middleware(CORSMiddleware, allow_origins=_origins,
                    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-                   allow_headers=["*"],
-                   expose_headers=["*"],
-                   max_age=600)
+                   allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
 
 store = Store(CFG)
 engine = MuseEngine(CFG)
@@ -144,44 +139,30 @@ async def _validation_exc(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
-# ------------------------- 405 鉴权旁路修复（缺陷 11） -------------------------
-# 问题：Starlette 的 405 Method Not Allowed 是在「路由匹配阶段」直接返回的，
-# 早于 FastAPI 的依赖注入 —— 也就是说 `Depends(auth)` 根本没跑。
-# 结果：未授权的人只要用错方法（比如对 /v1/videos 发 GET），
-# 就能根据 405 / 200 / 404 的差异枚举出服务到底有哪些端点。
-#
-# 修法：加一层最外层中间件，凡是命中 /v1/* 且最终返回 405 的请求，
-# 先做一次鉴权；鉴权不过直接返回 401，不再泄露「这个方法不行」的信号。
+# Enforce authorization before routing, including unknown paths and wrong methods.
 @app.middleware("http")
-async def _guard_method_not_allowed(request: Request, call_next):
+async def security_boundary(request: Request, call_next):
+    path = request.url.path
+    if request.method != "OPTIONS":
+        role = KEYRING.role(request.headers.get("authorization"))
+        if path.startswith("/admin/") and role != "admin":
+            return JSONResponse({"detail": "Admin key required"}, status_code=401 if role is None else 403)
+        if path.startswith("/v1/") and not path.startswith("/v1/media/") and role is None:
+            return JSONResponse({"detail": "Bearer key required"}, status_code=401)
     response = await call_next(request)
-    if (response.status_code == 405
-            and request.url.path.startswith("/v1/")):
-        auth_err = _check_bearer(request.headers.get("authorization"))
-        if auth_err is not None:
-            return JSONResponse(
-                status_code=401,
-                content={"error": {"message": auth_err,
-                                   "type": "invalid_request_error",
-                                   "param": None, "code": 401}})
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
     return response
 
 
-def _check_bearer(authorization: str | None) -> str | None:
-    """返回 None 表示鉴权通过；否则返回错误信息字符串。
-
-    必须与 `auth()` 的判定逻辑保持一致，否则会出现
-    「405 路径放行了但真实请求仍被拒」的不一致。
-    """
-    if not CFG.api_key:
-        return None
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return "缺少 Authorization: Bearer <key>"
-    parts = authorization.split(None, 1)
-    token = parts[1].strip() if len(parts) > 1 else ""
-    if not token or token != CFG.api_key:
-        return "API key 无效"
-    return None
+def _check_bearer(authorization):
+    return None if KEYRING.role(authorization) else "API key required"
 
 MODELS = [
     {"id": "muse-spark", "object": "model", "owned_by": "muse",
@@ -232,15 +213,17 @@ def resolve_model(name: str | None, default: str = "muse-image") -> str:
 
 # ------------------------- 鉴权 -------------------------
 def auth(authorization: str | None = Header(default=None)):
-    if not CFG.api_key:
-        return True
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "缺少 Authorization: Bearer <key>")
-    parts = authorization.split(None, 1)
-    token = parts[1].strip() if len(parts) > 1 else ""
-    if not token or token != CFG.api_key:
-        raise HTTPException(401, "API key 无效")
-    return True
+    role = KEYRING.role(authorization)
+    if role is None:
+        raise HTTPException(401, "Bearer key required")
+    return role
+
+
+def admin_auth(authorization: str | None = Header(default=None)):
+    role = auth(authorization)
+    if role != "admin":
+        raise HTTPException(403, "Admin key required")
+    return role
 
 
 # ------------------------- 请求模型 -------------------------
@@ -1624,19 +1607,37 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
     return envelope("completed", text)
 
 
+@app.post("/v1/media/session")
+def media_session(request: Request, role=Depends(auth)):
+    response = JSONResponse({"expires_in": 3600})
+    response.set_cookie("muse_media", KEYRING.media_ticket(role), max_age=3600,
+                        httponly=True, secure=CFG.public_base.startswith("https://") or request.url.scheme == "https",
+                        samesite="strict", path="/v1/media/")
+    return response
+
+
 @app.get("/v1/media/{name}")
-def get_media(name: str):
-    if "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(400, "非法文件名")
+def get_media(name: str, request: Request):
+    if not KEYRING.role(request.headers.get("authorization")) and not KEYRING.valid_media_ticket(request.cookies.get("muse_media")):
+        raise HTTPException(401, "Media authentication required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp|gif|bmp|mp4|webm|mov)", name):
+        raise HTTPException(400, "Invalid media name")
     p = os.path.join(CFG.media_dir, name)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "文件不存在")
+    if os.path.islink(p) or not os.path.isfile(p):
+        raise HTTPException(404, "Media not found")
     return FileResponse(p)
 
 
 # ------------------------- 管理：总览 -------------------------
+@app.delete("/v1/media/session")
+def clear_media_session():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("muse_media", path="/v1/media/")
+    return response
+
+
 @app.get("/admin/status")
-def admin_status(_=Depends(auth)):
+def admin_status(_=Depends(admin_auth)):
     base = _public_base()
     return {
         "accounts": store.list_accounts(),
@@ -1658,18 +1659,18 @@ def admin_status(_=Depends(auth)):
 
 # ------------------------- 管理：账号池 -------------------------
 @app.get("/admin/scheduler")
-def admin_scheduler(_=Depends(auth)):
+def admin_scheduler(_=Depends(admin_auth)):
     """生成调度器观测：队列长度、正在跑的任务、累计指标（修缺陷 4 可观测性）。"""
     return SCHED.stats()
 
 
 @app.get("/admin/accounts")
-def list_accounts(_=Depends(auth)):
+def list_accounts(_=Depends(admin_auth)):
     return {"accounts": store.list_accounts(), "stats": store.stats()}
 
 
 @app.post("/admin/accounts")
-def add_account(req: AccountRequest, _=Depends(auth)):
+def add_account(req: AccountRequest, _=Depends(admin_auth)):
     added: list[dict] = []
     seen: list[dict] = []          # 本次导入的所有 cookie，用来检查核心项是否齐全
 
@@ -1704,7 +1705,7 @@ def add_account(req: AccountRequest, _=Depends(auth)):
 
 
 @app.patch("/admin/accounts/{aid}")
-def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
+def patch_account(aid: str, req: AccountPatch, _=Depends(admin_auth)):
     acc = store.update_account(aid, label=req.label, enabled=req.enabled)
     if not acc:
         raise HTTPException(404, "账号不存在")
@@ -1713,7 +1714,7 @@ def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
 
 
 @app.delete("/admin/accounts/{aid}")
-def del_account(aid: str, _=Depends(auth)):
+def del_account(aid: str, _=Depends(admin_auth)):
     ok = store.delete_account(aid)
     if not ok:
         raise HTTPException(404, "账号不存在")
@@ -1721,7 +1722,7 @@ def del_account(aid: str, _=Depends(auth)):
 
 
 @app.post("/admin/accounts/{aid}/test")
-async def test_account(aid: str, _=Depends(auth)):
+async def test_account(aid: str, _=Depends(admin_auth)):
     """真实打开 muse.ai 验证该账号 cookie 是否仍可登录。"""
     acc = store.get_account(aid)
     if not acc:
@@ -1757,12 +1758,12 @@ async def test_account(aid: str, _=Depends(auth)):
 
 
 @app.post("/admin/accounts/{aid}/relogin")
-async def relogin_account(aid: str, _=Depends(auth)):
+async def relogin_account(aid: str, _=Depends(admin_auth)):
     return await test_account(aid, _)
 
 
 @app.post("/admin/accounts/{aid}/cookies")
-def update_cookies(aid: str, payload: dict = Body(...), _=Depends(auth)):
+def update_cookies(aid: str, payload: dict = Body(...), _=Depends(admin_auth)):
     """更新某个账号的 cookie（用于会话过期后补新 cookie）。"""
     cookies = dict(payload.get("cookies") or {})
     if payload.get("cookie_header"):
@@ -1784,7 +1785,7 @@ def update_cookies(aid: str, payload: dict = Body(...), _=Depends(auth)):
 
 
 @app.post("/admin/relogin")
-def relogin(_=Depends(auth)):
+def relogin(_=Depends(admin_auth)):
     acc = store.pick_account(rotate=True)
     if not acc:
         raise HTTPException(400, "没有可用账号")
@@ -1798,7 +1799,7 @@ def relogin(_=Depends(auth)):
 
 # ------------------------- 管理：额度 -------------------------
 @app.post("/admin/accounts/{aid}/quota")
-async def query_quota(aid: str, _=Depends(auth)):
+async def query_quota(aid: str, _=Depends(admin_auth)):
     """打开 muse.ai 的 Settings 面板读该账号的额度（实时），并缓存到账号记录。
 
     返回例：{"plan":"Free plan","weekly_reset":"Sep 30",
@@ -1831,7 +1832,7 @@ async def query_quota(aid: str, _=Depends(auth)):
 
 
 @app.post("/admin/quota")
-async def query_any_quota(_=Depends(auth)):
+async def query_any_quota(_=Depends(admin_auth)):
     """用当前最久未用的可用账号查一次额度（同池账号共享同一 muse.ai 计划的
     通常只有一人使用时够用；多账号时建议按账号查）。"""
     acc = store.pick_account(rotate=True)
@@ -1840,51 +1841,26 @@ async def query_any_quota(_=Depends(auth)):
     return await query_quota(acc["id"], _)
 
 
-# ------------------------- 管理：接入信息 / API Key -------------------------
+# ------------------------- Credentials -------------------------
 def _public_base() -> str:
     return (CFG.public_base or "").rstrip("/")
 
 
 @app.get("/admin/apikey")
-def get_apikey(_=Depends(auth)):
+def get_apikey(_=Depends(admin_auth)):
     base = _public_base()
-    base_url = f"{base}/v1" if base else ""
-    return {"api_key": CFG.api_key, "base_url": base_url,
-            "models_url": f"{base}/v1/models" if base else "",
-            "media_url": f"{base}/v1/media/{{name}}" if base else "/v1/media/{name}"}
+    return {"api_key": KEYRING.keys["api"], "base_url": f"{base}/v1",
+            "models_url": f"{base}/v1/models", "media_url": f"{base}/v1/media/{{name}}"}
 
 
 @app.post("/admin/apikey/rotate")
-def rotate_apikey(_=Depends(auth)):
-    """生成新的 API Key，写入 .env 并立即生效（不用重启）。"""
-    import secrets
-    new_key = "m2a_" + secrets.token_hex(24)
-    old = CFG.api_key
-    CFG.api_key = new_key
-    _persist_env("MUSE2API_KEY", new_key)
-    return {"ok": True, "api_key": new_key, "previous": old,
-            "message": "已生成新 Key 并立即生效；旧 Key 已失效，请更新下游项目"}
+def rotate_apikey(_=Depends(admin_auth)):
+    return {"ok": True, "api_key": KEYRING.rotate("api")}
 
 
-def _persist_env(key: str, value: str):
-    """把配置写回 .env（保留其它行，原子替换）。"""
-    path = os.path.join(CFG.base_dir, ".env")
-    try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except OSError:
-        lines = []
-    found = False
-    for i, ln in enumerate(lines):
-        if ln.strip().startswith(key + "="):
-            lines[i] = f"{key}={value}"
-            found = True
-    if not found:
-        lines.append(f"{key}={value}")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines).strip() + "\n")
-    os.replace(tmp, path)
+@app.post("/admin/adminkey/rotate")
+def rotate_adminkey(_=Depends(admin_auth)):
+    return {"ok": True, "admin_key": KEYRING.rotate("admin")}
 
 
 # ------------------------- 管理：Cookie 获取 -------------------------
@@ -1936,24 +1912,24 @@ def extension_files():
 
 # ------------------------- 管理：任务 / 媒体 -------------------------
 @app.get("/admin/tasks")
-def admin_tasks(limit: int = 50, _=Depends(auth)):
+def admin_tasks(limit: int = 50, _=Depends(admin_auth)):
     return {"tasks": store.list_tasks(limit)}
 
 
 @app.delete("/admin/tasks/{tid}")
-def del_task(tid: str, _=Depends(auth)):
+def del_task(tid: str, _=Depends(admin_auth)):
     if not store.delete_task(tid):
         raise HTTPException(404, "任务不存在")
     return {"deleted": True}
 
 
 @app.post("/admin/tasks/clear")
-def clear_tasks(payload: dict = Body(default={}), _=Depends(auth)):
+def clear_tasks(payload: dict = Body(default={}), _=Depends(admin_auth)):
     return {"removed": store.clear_tasks(int(payload.get("keep") or 0))}
 
 
 @app.get("/admin/media")
-def admin_media(_=Depends(auth)):
+def admin_media(_=Depends(admin_auth)):
     d = CFG.media_dir
     items = []
     if os.path.isdir(d):
@@ -1971,7 +1947,7 @@ def admin_media(_=Depends(auth)):
 
 # ------------------------- 前端页面 -------------------------
 def _admin_html() -> str:
-    p = os.path.join(BASE_DIR, "admin.html")
+    p = os.path.join(BASE_DIR, "web", "admin.html")
     try:
         with open(p, encoding="utf-8") as f:
             return f.read()
@@ -1985,7 +1961,7 @@ def _admin_html() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return _admin_html()
+    return FileResponse(os.path.join(BASE_DIR, "web", "index.html"), media_type="text/html")
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -2135,7 +2111,7 @@ async def _keepalive_loop():
 
 
 @app.post("/admin/accounts/keepalive")
-async def trigger_keepalive_all(force: bool = True, _=Depends(auth)):
+async def trigger_keepalive_all(force: bool = True, _=Depends(admin_auth)):
     """管理员手动触发一次全账号保活续期。"""
     if KEEPALIVE_STATE["running"]:
         return {"status": "busy", "message": "保活任务正在执行中，请稍候"}
@@ -2143,343 +2119,23 @@ async def trigger_keepalive_all(force: bool = True, _=Depends(auth)):
 
 
 @app.post("/admin/accounts/{aid}/keepalive")
-async def trigger_keepalive_single(aid: str, _=Depends(auth)):
+async def trigger_keepalive_single(aid: str, _=Depends(admin_auth)):
     """手动针对单个账号执行保活续期。"""
     return await asyncio.to_thread(_probe_account_sync, aid, False)
 
 
 @app.get("/admin/keepalive/status")
-def get_keepalive_status(_=Depends(auth)):
+def get_keepalive_status(_=Depends(admin_auth)):
     """获取保活守护协程状态。"""
     return KEEPALIVE_STATE
 
 
-# ------------------------- 仓库实时更新检测、通知与一键在线升级 -------------------------
-REPO_URL = "https://github.com/czg86389-hub/muse2api"
-TRACKED_REPO_PATHS = [
-    "app.py", "engine.py", "store.py", "cdp.py", "config.py",
-    "admin.html", "README.md", "version.json", "requirements.txt",
-    "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
-    "LICENSE", "extension", "deploy", "tools",
-]
-_UPDATE_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
-
-
-def _read_env_key(key: str) -> str:
-    val = os.environ.get(key, "").strip()
-    if val:
-        return val
-    path = os.path.join(CFG.base_dir, ".env")
-    try:
-        with open(path, encoding="utf-8") as f:
-            for ln in f.read().splitlines():
-                s = ln.strip()
-                if s.startswith(key + "="):
-                    return s.split("=", 1)[1].strip()
-    except OSError:
-        pass
-    return ""
-
-
-def _read_local_version() -> dict:
-    p = os.path.join(BASE_DIR, "version.json")
-    try:
-        with open(p, encoding="utf-8") as f:
-            obj = json.load(f)
-            if isinstance(obj, dict):
-                return obj
-    except Exception:
-        pass
-    return {"version": "1.5.0", "highlights": []}
-
-
-def _installed_sha_file() -> str:
-    return os.path.join(CFG.data_dir, ".installed_sha")
-
-
-def _git(args: list[str], timeout: int = 30):
-    import subprocess
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    return subprocess.run(
-        ["git", "-c", f"safe.directory={BASE_DIR}", *args],
-        cwd=BASE_DIR,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
-
-
-def _ensure_git_repo(token: str = ""):
-    """确保 BASE_DIR 已初始化为绑定 czg86389-hub/muse2api 的 Git 仓库。"""
-    git_dir = os.path.join(BASE_DIR, ".git")
-    remote_url = f"https://x-access-token:{token}@github.com/czg86389-hub/muse2api.git" if token else f"{REPO_URL}.git"
-    if not os.path.isdir(git_dir):
-        _git(["init", "-b", "main"])
-        _git(["remote", "add", "origin", remote_url])
-        _git(["fetch", "origin", "main"], timeout=45)
-        _git(["reset", "--mixed", "origin/main"])
-    else:
-        _git(["remote", "set-url", "origin", remote_url])
-    _git(["config", "user.name", "czg86389-hub"])
-    _git(["config", "user.email", "czg86389-hub@users.noreply.github.com"])
-
-
-def _check_update_sync(force: bool = False) -> dict:
-    """检测 GitHub 官方仓库 (czg86389-hub/muse2api) 是否有新版本或新提交。
-    默认缓存 90 秒，防止频繁刷新触发 GitHub API 速率限制。"""
-    now = time.time()
-    if not force and _UPDATE_CACHE["data"] and (now - _UPDATE_CACHE["ts"]) < 90:
-        return _UPDATE_CACHE["data"]
-
-    import requests
-    token = _read_env_key("GITHUB_TOKEN")
-    local_ver_obj = _read_local_version()
-    local_version = str(local_ver_obj.get("version") or "1.5.0")
-
-    has_git = os.path.isdir(os.path.join(BASE_DIR, ".git"))
-    local_sha, local_msg, local_ts = "", "", 0
-    if has_git:
-        try:
-            r_sha = _git(["rev-parse", "--short", "HEAD"])
-            if r_sha.returncode == 0:
-                local_sha = r_sha.stdout.strip()[:7]
-            r_log = _git(["log", "-1", "--format=%s||%ct"])
-            if r_log.returncode == 0 and "||" in r_log.stdout:
-                parts = r_log.stdout.strip().split("||", 1)
-                local_msg = parts[0]
-                local_ts = int(parts[1])
-        except Exception:
-            pass
-
-    if not local_sha and os.path.isfile(_installed_sha_file()):
-        try:
-            with open(_installed_sha_file(), encoding="utf-8") as f:
-                local_sha = f.read().strip()[:7]
-        except OSError:
-            pass
-
-    remote_version = local_version
-    highlights = list(local_ver_obj.get("highlights") or [])
-    try:
-        rv = requests.get(
-            f"https://raw.githubusercontent.com/czg86389-hub/muse2api/main/version.json?t={int(now)}",
-            timeout=6,
-        )
-        if rv.status_code == 200:
-            rvj = rv.json()
-            if isinstance(rvj, dict):
-                remote_version = str(rvj.get("version") or remote_version)
-                if rvj.get("highlights"):
-                    highlights = list(rvj["highlights"])
-    except Exception:
-        pass
-
-    remote_sha, remote_msg, remote_time = "", "", ""
-    recent_commits = []
-    try:
-        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "muse2api-updater"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        resp = requests.get(
-            "https://api.github.com/repos/czg86389-hub/muse2api/commits?sha=main&per_page=5",
-            headers=headers,
-            timeout=6,
-        )
-        if resp.status_code == 200 and isinstance(resp.json(), list):
-            commits = resp.json()
-            for idx, c in enumerate(commits):
-                sha7 = (c.get("sha") or "")[:7]
-                c_msg = ((c.get("commit") or {}).get("message") or "").splitlines()[0]
-                c_date = (((c.get("commit") or {}).get("committer") or {}).get("date") or "")
-                c_url = c.get("html_url") or f"{REPO_URL}/commit/{sha7}"
-                if idx == 0:
-                    remote_sha = sha7
-                    remote_msg = c_msg
-                    remote_time = c_date
-                recent_commits.append({
-                    "sha": sha7,
-                    "message": c_msg,
-                    "date": c_date,
-                    "url": c_url,
-                })
-    except Exception:
-        pass
-
-    # 若用户通过 Docker/ZIP 部署（无 .git）且首次运行版本一致，记录初始基准 SHA
-    if not local_sha and remote_sha and local_version == remote_version:
-        local_sha = remote_sha
-        try:
-            with open(_installed_sha_file(), "w", encoding="utf-8") as f:
-                f.write(remote_sha)
-        except OSError:
-            pass
-
-    has_update = False
-    if remote_sha and local_sha and remote_sha != local_sha:
-        has_update = True
-    elif remote_version and local_version and remote_version != local_version:
-        has_update = True
-
-    data = {
-        "repo_url": REPO_URL,
-        "has_git": has_git,
-        "local_version": local_version,
-        "remote_version": remote_version,
-        "local_sha": local_sha,
-        "local_msg": local_msg,
-        "local_ts": local_ts,
-        "remote_sha": remote_sha,
-        "remote_msg": remote_msg,
-        "remote_time": remote_time,
-        "has_update": has_update,
-        "up_to_date": not has_update and bool(remote_sha or remote_version),
-        "highlights": highlights,
-        "recent_commits": recent_commits,
-        "checked_at": int(now),
-    }
-    _UPDATE_CACHE["ts"] = now
-    _UPDATE_CACHE["data"] = data
-    return data
-
-
-def _upgrade_from_github_sync() -> dict:
-    """从 GitHub 拉取最新代码覆盖核心文件（兼容 Git 与无 Git 的 Docker/ZIP 环境），绝不触碰 .env 与 data/。"""
-    import requests
-    import tarfile
-
-    token = _read_env_key("GITHUB_TOKEN")
-    upgraded_via = ""
-    try:
-        _ensure_git_repo(token)
-        f_res = _git(["fetch", "origin", "main"], timeout=45)
-        if f_res.returncode == 0:
-            _git(["checkout", "-f", "origin/main", "--", "."])
-            _git(["reset", "--mixed", "origin/main"])
-            upgraded_via = "git"
-    except Exception as e:
-        log.warning("Git 拉取更新失败，将使用 Tarball 方式更新: %s", e)
-
-    if not upgraded_via:
-        resp = requests.get(
-            "https://codeload.github.com/czg86389-hub/muse2api/tar.gz/refs/heads/main",
-            timeout=60,
-        )
-        if resp.status_code != 200:
-            raise HTTPException(502, f"下载 GitHub 更新包失败 (HTTP {resp.status_code})")
-        protected_files = {".env", "data/accounts.json", "data/tasks.json"}
-        with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
-            for member in tar.getmembers():
-                parts = member.name.split("/", 1)
-                if len(parts) < 2 or not parts[1]:
-                    continue
-                rel = parts[1].replace("\\", "/")
-                if ".." in rel or rel in protected_files:
-                    continue
-                target_path = os.path.join(BASE_DIR, rel)
-                if member.isdir():
-                    os.makedirs(target_path, exist_ok=True)
-                elif member.isfile():
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                    fobj = tar.extractfile(member)
-                    if fobj is not None:
-                        with open(target_path, "wb") as out_f:
-                            out_f.write(fobj.read())
-        upgraded_via = "tarball"
-
-    _UPDATE_CACHE["ts"] = 0.0
-    status = _check_update_sync(force=True)
-    if status.get("remote_sha"):
-        try:
-            with open(_installed_sha_file(), "w", encoding="utf-8") as f:
-                f.write(status["remote_sha"])
-            status["local_sha"] = status["remote_sha"]
-            status["has_update"] = False
-            status["up_to_date"] = True
-        except OSError:
-            pass
-    return {
-        "ok": True,
-        "via": upgraded_via,
-        "message": f"已成功更新至最新版本 {status.get('remote_version')} ({status.get('remote_sha')})",
-        "status": status,
-    }
-
-
-@app.get("/admin/update/check")
-@app.get("/admin/repo/status")
-async def admin_check_update(force: bool = False):
-    """供所有已部署节点实时检测 GitHub 官方仓库是否有新版本更新。"""
-    return await asyncio.to_thread(_check_update_sync, force)
-
-
-@app.post("/admin/update/upgrade")
-@app.post("/admin/repo/pull")
-async def admin_upgrade_now(payload: dict = Body(default={}), _=Depends(auth)):
-    """一键从 GitHub 官方仓库拉取最新更新并自动平滑重启服务。"""
-    res = await asyncio.to_thread(_upgrade_from_github_sync)
-    restart = payload.get("restart", True) if isinstance(payload, dict) else True
-    if restart:
-        def _delayed_restart():
-            time.sleep(0.5)
-            try:
-                engine.stop()
-            except Exception:
-                pass
-            os._exit(0)
-        threading.Thread(target=_delayed_restart, daemon=True).start()
-    return res
-
-
-@app.post("/admin/repo/push")
-async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
-    """维护者专用：将当前节点核心代码推送到 GitHub 仓库（自动过滤 .env 与 data 目录）。"""
-    msg = (payload.get("message") or "").strip() or f"chore: sync update ({time.strftime('%Y-%m-%d %H:%M:%S')})"
-    new_token = (payload.get("github_token") or "").strip()
-    if new_token:
-        _persist_env("GITHUB_TOKEN", new_token)
-        os.environ["GITHUB_TOKEN"] = new_token
-    token = new_token or _read_env_key("GITHUB_TOKEN")
-
-    def _do_push():
-        _ensure_git_repo(token)
-        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
-        _git(["add", "--", *existing_paths])
-        st = _git(["status", "--porcelain", "--", *existing_paths])
-        committed = False
-        if st.stdout.strip():
-            c_res = _git(["commit", "-m", msg])
-            if c_res.returncode != 0:
-                raise HTTPException(500, f"Git commit 失败: {c_res.stderr or c_res.stdout}")
-            committed = True
-        p_res = _git(["push", "origin", "HEAD:main"], timeout=60)
-        if p_res.returncode != 0:
-            err = (p_res.stderr or p_res.stdout or "").strip()
-            raise HTTPException(500, f"Git push 失败: {err[:300]}")
-        _UPDATE_CACHE["ts"] = 0.0
-        status = _check_update_sync(force=True)
-        return {
-            "ok": True,
-            "committed": committed,
-            "message": "已成功提交并推送到 GitHub 仓库",
-            "status": status,
-        }
-
-    return await asyncio.to_thread(_do_push)
-
-
+# ------------------------- Application lifecycle -------------------------
 @app.on_event("startup")
 async def _startup():
     for task in list(store.tasks.values()):
         if task.get("kind") == "image" and task.get("status") in ("queued", "processing"):
             store.update_task(task["id"], status="failed", error="服务重启中断了任务，请重新提交")
-    if not CFG.api_key:
-        import secrets
-        new_key = "m2a_" + secrets.token_hex(24)
-        CFG.api_key = new_key
-        _persist_env("MUSE2API_KEY", new_key)
-        log.info("🔑 未检测到 MUSE2API_KEY，已自动生成初始密钥: %s", new_key)
     SCHED.start()
     asyncio.create_task(_keepalive_loop())
 
