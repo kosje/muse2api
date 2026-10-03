@@ -1625,7 +1625,12 @@ def get_media(name: str, request: Request):
     p = os.path.join(CFG.media_dir, name)
     if os.path.islink(p) or not os.path.isfile(p):
         raise HTTPException(404, "Media not found")
-    return FileResponse(p)
+    # Minimal container images do not always ship a MIME database (notably
+    # WebP). Use explicit types for the already allowlisted media extensions.
+    media_types = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                   "webp": "image/webp", "gif": "image/gif", "bmp": "image/bmp",
+                   "mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime"}
+    return FileResponse(p, media_type=media_types[name.rsplit(".", 1)[1]])
 
 
 # ------------------------- 管理：总览 -------------------------

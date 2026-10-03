@@ -120,6 +120,17 @@ def test_https_media_cookie(client, monkeypatch):
     assert "Secure" in client.post("/v1/media/session", headers=API).headers["set-cookie"]
 
 
+@pytest.mark.parametrize('extension,mime', [('webp','image/webp'),('png','image/png'),('jpg','image/jpeg'),('mp4','video/mp4')])
+def test_media_type_without_system_mime_database(client, extension, mime, monkeypatch):
+    import mimetypes
+    monkeypatch.setattr(mimetypes,'guess_type',lambda *args,**kwargs:(None,None))
+    path=Path(app.CFG.media_dir)/('image-format-fixture.'+extension)
+    path.write_bytes(b'fixture bytes')
+    response=client.get('/v1/media/'+path.name,headers=API)
+    assert response.status_code==200
+    assert response.headers['content-type']==mime
+
+
 def test_rotation_survives_restart_and_revokes_media(client):
     client.post("/v1/media/session", headers=API)
     old_path = app.KEYRING.path
