@@ -31,6 +31,9 @@ wheels/
 
 # Runtime & User Data
 data/accounts.json
+data/auth.json
+data/profiles/
+.pytest_cache/
 data/tasks.json
 data/.installed_sha
 data/debug-*.json

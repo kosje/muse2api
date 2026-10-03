@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import urllib.request
+from security import download_image, MAX_IMAGE_BYTES, IMAGE_TYPES
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -68,7 +69,7 @@ class MuseEngine:
             "--autoplay-policy=no-user-gesture-required",
             "--window-size=1440,2400",
             f"--remote-debugging-port={self.cfg.cdp_port}",
-            "--remote-allow-origins=*",
+            "--remote-debugging-address=127.0.0.1",
             f"--user-data-dir={self.cfg.profile_dir}",
             "about:blank",
         ]
@@ -95,7 +96,7 @@ class MuseEngine:
         self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
         cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
         self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
-                                     env=env, cwd=cwd_dir)
+                                     env=env, cwd=cwd_dir, start_new_session=(os.name != "nt"))
         last = None
         for _ in range(90):
             try:
@@ -108,17 +109,41 @@ class MuseEngine:
         raise MuseGenerationError(f"Chromium 启动失败: {last}")
 
     def stop(self):
+        # A browser owns renderer/helper children. Isolate its process group at
+        # launch and stop the whole group; waiting only for the parent can leave
+        # children writing the profile while the next browser is starting.
+        if self.browser and self.proc:
+            try:
+                self.browser.send("Browser.close", timeout=2)
+            except Exception:
+                pass
         for c in (self.page, self.browser):
             if c:
                 c.close()
         self.page = self.browser = None
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        if self.proc:
             try:
-                self.proc.wait(timeout=10)
-            except Exception:  # noqa: BLE001
+                if os.name != "nt":
+                    os.killpg(self.proc.pid, signal.SIGTERM)
+                elif self.proc.poll() is None:
+                    self.proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 self.proc.kill()
+            finally:
+                if os.name != "nt":
+                    try:
+                        os.killpg(self.proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                self.proc.wait(timeout=5)
         self.proc = None
+        if self._log:
+            self._log.close()
+            self._log = None
 
     # ---------------- 页面 ----------------
     def _open_page(self):
@@ -962,36 +987,31 @@ class MuseEngine:
 
     @staticmethod
     def _normalize_image(img: str) -> tuple[str, str]:
-        """将各种形态的图片输入归一为 (base64_str, mime_type)。"""
-        if not img:
-            return "", "image/png"
-        img = str(img).strip()
+        if not isinstance(img, str) or not img:
+            raise MuseGenerationError("Reference image is required")
+        img = img.strip()
+        if img.startswith(("https://", "http://")):
+            try:
+                data, mime = download_image(img)
+                return base64.b64encode(data).decode("ascii"), mime
+            except Exception:
+                raise MuseGenerationError("Remote image rejected or unavailable") from None
+        mime = "image/png"
         if img.startswith("data:"):
-            parts = img.split(",", 1)
-            mime = "image/png"
-            if ";" in parts[0]:
-                mime = parts[0].split(";")[0].replace("data:", "").strip()
-            return (parts[1].strip() if len(parts) > 1 else ""), mime
-        if img.startswith("http://") or img.startswith("https://"):
-            try:
-                req = urllib.request.Request(img, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    data = resp.read()
-                    mime = resp.headers.get_content_type() or "image/png"
-                    return base64.b64encode(data).decode("ascii"), mime
-            except Exception as e:
-                log.warning("下载远程参考图失败: %s", e)
-                return "", "image/png"
-        if os.path.isfile(img):
-            try:
-                with open(img, "rb") as f:
-                    data = f.read()
-                    mime = mimetypes.guess_type(img)[0] or "image/png"
-                    return base64.b64encode(data).decode("ascii"), mime
-            except Exception as e:
-                log.warning("读取本地参考图失败: %s", e)
-                return "", "image/png"
-        return img, "image/png"
+            head, sep, img = img.partition(",")
+            mime = head[5:].split(";", 1)[0].lower()
+            if not sep or not head.endswith(";base64") or mime not in IMAGE_TYPES:
+                raise MuseGenerationError("Unsupported image data URI")
+        if len(img) > MAX_IMAGE_BYTES * 2:
+            raise MuseGenerationError("Reference image too large")
+        try:
+            data = base64.b64decode(img, validate=True)
+        except Exception:
+            raise MuseGenerationError("Invalid base64 image") from None
+        if not data or len(data) > MAX_IMAGE_BYTES:
+            raise MuseGenerationError("Invalid image size")
+        # Local file paths are never accepted, even if they resemble base64.
+        return base64.b64encode(data).decode("ascii"), mime
 
     def _clear_attachments(self):
         """清除聊天输入框里遗留的附件缩略图。"""

@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muse 创作工作台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display:none !important; }
+  :root {
+    --bg:#f7f7f5; --panel:#fff; --panel-2:#fafafa; --border:#e4e3de;
+    --border-strong:#d0cfc9; --text:#23231f; --text-2:#6b6a64; --text-3:#9a9992;
+    --accent:#c0392b; --accent-soft:#fdf2f0; --accent-hover:#a5301f;
+    --ok:#1e8e5a; --warn:#b7791f; --err:#c0392b; --radius:10px; --radius-lg:14px;
+  }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--text); font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1180px; margin:0 auto; padding:28px 24px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:24px; }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .logo { width:38px; height:38px; border-radius:9px; background:var(--accent); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:500; flex-shrink:0; }
+  .brand h1 { font-size:17px; font-weight:500; letter-spacing:-0.01em; }
+  .brand p { font-size:12px; color:var(--text-3); }
+  .status { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-2);
+    background:var(--panel); border:1px solid var(--border); padding:6px 12px; border-radius:999px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--text-3); flex-shrink:0; }
+  .dot.on { background:var(--ok); } .dot.off { background:var(--err); }
+  .grid { display:grid; grid-template-columns:400px 1fr; gap:20px; align-items:start; }
+  @media (max-width:900px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-lg); padding:20px; }
+  .card + .card { margin-top:16px; }
+  .card-title { font-size:13px; font-weight:500; display:flex; align-items:center;
+    justify-content:space-between; margin-bottom:16px; }
+  .card-title .hint { font-size:11px; color:var(--text-3); font-weight:400; }
+  .mode-tabs { display:flex; gap:8px; margin-bottom:18px; }
+  .mode-tabs button { flex:1; font:inherit; padding:10px; border:1px solid var(--border);
+    border-radius:var(--radius); background:var(--panel-2); cursor:pointer; }
+  .mode-tabs button[aria-pressed=true] { color:var(--accent); border-color:var(--accent); background:var(--accent-soft); }
+  .mode-tabs button:disabled { cursor:wait; opacity:.65; }
+  label.field { display:block; margin-bottom:16px; }
+  label.field:last-of-type { margin-bottom:0; }
+  .lbl { display:flex; align-items:center; justify-content:space-between; font-size:12px;
+    color:var(--text-2); margin-bottom:7px; }
+  .lbl .count { font-size:11px; color:var(--text-3); font-variant-numeric:tabular-nums; }
+  textarea,input[type=text],input[type=password],select { width:100%; font-family:inherit; font-size:13px;
+    color:var(--text); background:var(--panel-2); border:1px solid var(--border); border-radius:var(--radius);
+    padding:10px 12px; outline:none; transition:border-color .15s, background .15s; }
+  textarea { resize:vertical; min-height:108px; line-height:1.7; }
+  textarea:focus,input:focus,select:focus { border-color:var(--accent); background:#fff; }
+  textarea::placeholder,input::placeholder { color:var(--text-3); }
+  select { cursor:pointer; appearance:none;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b6a64' stroke-width='1.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:right 12px center; padding-right:32px; }
+  .sizes { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+  .size-opt { border:1px solid var(--border); background:var(--panel-2); border-radius:var(--radius);
+    padding:10px 8px; cursor:pointer; display:flex; flex-direction:column; align-items:center;
+    gap:5px; transition:all .15s; text-align:center; }
+  .size-opt:hover { border-color:var(--border-strong); }
+  .size-opt.sel { border-color:var(--accent); background:var(--accent-soft); }
+  .size-opt .box { border:1.5px solid var(--text-3); border-radius:3px; transition:border-color .15s; }
+  .size-opt.sel .box { border-color:var(--accent); }
+  .size-opt .name { font-size:11px; color:var(--text-2); }
+  .size-opt.sel .name { color:var(--accent); font-weight:500; }
+  .box-16-9 { width:36px; height:20px; } .box-9-16 { width:20px; height:36px; }
+  .box-1-1 { width:28px; height:28px; } .box-4-3 { width:32px; height:24px; }
+  .drop { border:1.5px dashed var(--border-strong); border-radius:var(--radius); padding:18px;
+    text-align:center; cursor:pointer; transition:all .15s; background:var(--panel-2); position:relative; }
+  .drop:hover,.drop.over { border-color:var(--accent); background:var(--accent-soft); }
+  .drop .ico { font-size:20px; color:var(--text-3); margin-bottom:5px; }
+  .drop .t1 { font-size:12px; color:var(--text-2); }
+  .drop .t2 { font-size:11px; color:var(--text-3); margin-top:2px; }
+  .drop img { max-width:100%; max-height:130px; border-radius:7px; display:block; margin:0 auto; }
+  .drop.has-img { padding:8px; border-style:solid; border-color:var(--border); }
+  .clear-img { position:absolute; top:6px; right:6px; width:22px; height:22px; border-radius:50%;
+    border:none; background:rgba(35,35,31,.72); color:#fff; font-size:13px; cursor:pointer;
+    line-height:1; display:flex; align-items:center; justify-content:center; }
+  .clear-img:hover { background:rgba(35,35,31,.9); }
+  .btn { width:100%; border:none; border-radius:var(--radius); font-family:inherit; font-size:14px;
+    font-weight:500; padding:12px; cursor:pointer; transition:all .15s;
+    display:flex; align-items:center; justify-content:center; gap:8px; }
+  .btn-primary { background:var(--accent); color:#fff; margin-top:20px; }
+  .btn-primary:hover:not(:disabled) { background:var(--accent-hover); }
+  .btn-primary:disabled { background:var(--border-strong); color:#fff; cursor:not-allowed; }
+  .btn-ghost { background:var(--panel-2); color:var(--text-2); border:1px solid var(--border);
+    font-size:12px; padding:8px 12px; width:auto; }
+  .btn-ghost:hover { border-color:var(--border-strong); color:var(--text); }
+  .spinner { width:14px; height:14px; border-radius:50%; border:2px solid rgba(255,255,255,.35);
+    border-top-color:#fff; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .task-empty { text-align:center; padding:56px 20px; color:var(--text-3); }
+  .task-empty .ico { font-size:30px; margin-bottom:10px; opacity:.5; }
+  .task-empty .t { font-size:13px; }
+  .prog-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px; }
+  .prog-status { font-size:13px; font-weight:500; }
+  .prog-pct { font-size:13px; color:var(--text-2); font-variant-numeric:tabular-nums; }
+  .bar { height:5px; background:var(--border); border-radius:999px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:var(--accent); border-radius:999px; transition:width .5s ease; }
+  .prog-note { font-size:12px; color:var(--text-3); margin-top:10px; }
+  .prog-note.err { color:var(--err); }
+  video { width:100%; border-radius:var(--radius); background:#000; display:block; }
+  .result-image { display:block; width:100%; max-height:650px; object-fit:contain;
+    border-radius:var(--radius); background:var(--panel-2); }
+  .result-meta { display:flex; align-items:center; justify-content:space-between; gap:12px;
+    flex-wrap:wrap; margin-top:14px; }
+  .meta-txt { font-size:12px; color:var(--text-3); }
+  .result-actions { display:flex; gap:8px; }
+  .result-actions a { text-decoration:none; }
+  .result-actions .btn-ghost { display:inline-flex; }
+  .hist-list { display:flex; flex-direction:column; gap:8px; max-height:340px; overflow-y:auto; }
+  .hist-item { display:flex; gap:11px; align-items:center; padding:9px; border-radius:var(--radius);
+    cursor:pointer; border:1px solid transparent; transition:all .15s; }
+  .hist-item:hover { background:var(--panel-2); border-color:var(--border); }
+  .hist-thumb { width:56px; height:34px; border-radius:6px; flex-shrink:0; background:var(--panel-2);
+    border:1px solid var(--border); display:flex; align-items:center; justify-content:center;
+    font-size:14px; color:var(--text-3); overflow:hidden; }
+  .hist-body { min-width:0; flex:1; }
+  .hist-prompt { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hist-sub { font-size:11px; color:var(--text-3); margin-top:2px; }
+  .hist-badge { font-size:10px; padding:2px 7px; border-radius:999px; background:var(--panel-2);
+    border:1px solid var(--border); color:var(--text-2); flex-shrink:0; }
+  .hist-badge.ok { color:var(--ok); border-color:#b8e0c8; background:#f0f9f4; }
+  .hist-badge.fail { color:var(--err); border-color:#f0c8c4; background:var(--accent-soft); }
+  .hist-badge.run { color:var(--warn); border-color:#eed9ac; background:#fdf8ec; }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(80px);
+    background:var(--text); color:#fff; font-size:13px; padding:11px 20px; border-radius:var(--radius);
+    opacity:0; transition:all .25s; pointer-events:none; z-index:99; max-width:90vw; }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">M</div>
+      <div><h1>Muse 创作工作台</h1><p>视频生成 · 图片生成 · 参考图创作</p></div>
+    </div>
+    <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">未连接</span></div>
+  </header>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <div class="card-title">创作</div>
+        <div class="mode-tabs" role="group" aria-label="生成类型">
+          <button type="button" id="modeVideo" aria-pressed="true">视频</button>
+          <button type="button" id="modeImage" aria-pressed="false">图片</button>
+        </div>
+        <label class="field">
+          <div class="lbl"><span id="promptLabel">视频描述</span><span class="count" id="promptCount">0 / 1000</span></div>
+          <textarea id="prompt" maxlength="1000" placeholder="描述你想要的画面，越具体越好。例如：&#10;金色的枫叶在微风中缓缓飘落，阳光穿过树梢，镜头缓慢推进，电影级景深"></textarea>
+        </label>
+        <label class="field" id="durationField">
+          <div class="lbl"><span>时长</span></div>
+          <select id="duration">
+            <option value="5" selected>5 秒</option>
+            <option value="6">6 秒</option>
+            <option value="10">10 秒</option>
+          </select>
+        </label>
+        <label class="field">
+          <div class="lbl"><span>画幅</span></div>
+          <div class="sizes" id="sizes">
+            <div class="size-opt sel" data-size="16:9"><div class="box box-16-9"></div><div class="name">16:9 横屏</div></div>
+            <div class="size-opt" data-size="9:16"><div class="box box-9-16"></div><div class="name">9:16 竖屏</div></div>
+            <div class="size-opt" data-size="1:1"><div class="box box-1-1"></div><div class="name">1:1 方形</div></div>
+            <div class="size-opt" data-size="4:3"><div class="box box-4-3"></div><div class="name">4:3</div></div>
+          </div>
+        </label>
+        <label class="field">
+          <div class="lbl"><span id="referenceLabel">首帧图（可选）</span><span class="count" id="referenceHint">不填＝文生视频</span></div>
+          <div class="drop" id="drop">
+            <input type="file" id="file" accept="image/*" hidden>
+            <div id="dropInner">
+              <div class="ico">＋</div>
+              <div class="t1">点击或拖拽图片到这里</div>
+              <div class="t2" id="dropHint">作为视频首帧 · 支持 JPG / PNG / WebP</div>
+            </div>
+          </div>
+        </label>
+        <button class="btn btn-primary" id="genBtn"><span id="genBtnText">生成视频</span></button>
+        <p class="prog-note">图片和视频统一保存在管理台的<a href="/admin">生成文件</a>中。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">连接设置</div>
+        <label class="field">
+          <div class="lbl"><span>接口地址</span></div>
+          <input type="text" id="baseUrl" readonly placeholder="http://127.0.0.1:18610">
+        </label>
+        <label class="field">
+          <div class="lbl"><span>生成接口 Key</span></div>
+          <input type="password" id="apiKey" placeholder="m2a_...">
+        </label>
+        <button class="btn btn-ghost" id="saveCfg">保存并测试连接</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title"><span>当前任务</span><span class="hint" id="taskHint"></span></div>
+        <div id="taskArea">
+          <div class="task-empty"><div class="ico">▷</div>
+            <div class="t">在左侧选择视频或图片，填写描述开始创作</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>历史记录</span>
+          <button class="btn btn-ghost" id="clearHist">清空</button></div>
+        <div id="histArea">
+          <div class="task-empty" style="padding:28px 10px"><div class="t">暂无记录</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  var LS_CFG = 'muse_video_cfg', LS_HIST = 'muse_video_hist', POLL_MS = 4000;
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { base:'', key:'', size:'16:9', kind:'video', firstFrame:null, busy:false,
+                timer:null, taskId:null, tasks:[], polling:false, viewToken:0 };
+  function taskKind(t){ return t.kind==='image'?'image':'video'; }
+  function kindLabel(t){ return taskKind(t)==='image'?'图片':'视频'; }
+  function taskMeta(t){ return kindLabel(t)+' · '+esc(t.size||'')+(taskKind(t)==='video'?' · '+(t.duration||5)+'s':''); }
+  function setKind(kind){
+    if(state.busy) return;
+    state.kind=kind;
+    $('modeVideo').setAttribute('aria-pressed',String(kind==='video'));
+    $('modeImage').setAttribute('aria-pressed',String(kind==='image'));
+    $('durationField').hidden=kind==='image';
+    $('promptLabel').textContent=kind==='image'?'图片描述':'视频描述';
+    $('referenceLabel').textContent=kind==='image'?'参考图（可选）':'首帧图（可选）';
+    $('referenceHint').textContent=kind==='image'?'不填＝文生图':'不填＝文生视频';
+    if($('dropHint')) $('dropHint').textContent=kind==='image'?'作为图片创作参考 · 支持 JPG / PNG / WebP':'作为视频首帧 · 支持 JPG / PNG / WebP';
+    $('genBtnText').textContent=kind==='image'?'生成图片':'生成视频';
+  }
+  setInterval(function(){ if(state.key) mediaSession().catch(function(){setStatus('off','连接中断');}); }, 300000);
+  async function mediaSession(){
+    var controller=new AbortController(), timer=setTimeout(function(){controller.abort();},15000);
+    try{
+      var r=await fetch(api('/v1/media/session'),{method:'POST',headers:headers(),signal:controller.signal});
+      if(!r.ok) throw new Error(r.status===401?'媒体鉴权失败，请检查生成接口 Key。':'媒体服务请求失败（HTTP '+r.status+'）。');
+    }catch(e){if(e.name==='AbortError') throw new Error('媒体读取超时，请检查 SSH 隧道。');throw e;}
+    finally{clearTimeout(timer);}
+  }
+
+  function toast(m){ var t=$('toast'); t.textContent=m; t.classList.add('show');
+    clearTimeout(t._h); t._h=setTimeout(function(){t.classList.remove('show');},2600); }
+  function normBase(u){ u=(u||'').trim().replace(/\/+$/,''); if(!u) return '';
+    if(!/^https?:\/\//i.test(u)) u='http://'+u;
+    if(/\/v1$/i.test(u)) u=u.slice(0,-3); return u; }
+  function api(p){ return state.base+p; }
+  function headers(){ return {'Authorization':'Bearer '+state.key,'Content-Type':'application/json'}; }
+  function fmtBytes(n){ if(!n) return ''; return n<1048576?(n/1024).toFixed(0)+' KB':(n/1048576).toFixed(1)+' MB'; }
+  function fmtTime(ts){ if(!ts) return ''; var d=new Date(ts*1000);
+    return (d.getMonth()+1)+'/'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+  function setStatus(c,t){ $('statusDot').className='dot '+c; $('statusText').textContent=t; }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+  function loadCfg(){
+    var c={}; try{ c=JSON.parse(sessionStorage.getItem(LS_CFG)||'{}'); }catch(e){}
+    state.base=location.origin;
+    state.key=c.key||'';
+    $('baseUrl').value=state.base; $('apiKey').value=state.key;
+    if(state.key) testConn(true);
+  }
+  function saveCfg(){
+    state.base=location.origin; state.key=$('apiKey').value.trim();
+    $('baseUrl').value=state.base;
+    sessionStorage.setItem(LS_CFG, JSON.stringify({base:state.base,key:state.key}));
+  }
+  function testConn(silent){
+    if(!state.base||!state.key){ setStatus('off','未配置'); return; }
+    fetch(api('/v1/models'),{headers:headers()}).then(function(r){
+      if(r.ok){ setStatus('on','已连接'); if(!silent) toast('连接成功'); }
+      else if(r.status===401){ setStatus('off','Key 无效'); if(!silent) toast('API Key 无效（401）'); }
+      else { setStatus('off','HTTP '+r.status); if(!silent) toast('连接失败：HTTP '+r.status); }
+    }).catch(function(){ setStatus('off','连接失败');
+      if(!silent) toast('连不上 '+state.base+'，请检查地址与网络'); });
+  }
+
+  function loadHist(){ try{ state.tasks=JSON.parse(sessionStorage.getItem(LS_HIST)||'[]'); }catch(e){ state.tasks=[]; } renderHist(); }
+  function saveHist(){
+    var slim=state.tasks.slice(0,30).map(function(t){ return {id:t.id,prompt:t.prompt,status:t.status,
+      kind:taskKind(t),size:t.size,duration:t.duration,created:t.created,url:t.url||'',bytes:t.bytes||0,err:t.err||''}; });
+    try{ sessionStorage.setItem(LS_HIST,JSON.stringify(slim)); }catch(e){}
+  }
+  function addTask(t){ state.tasks.unshift(t); if(state.tasks.length>30) state.tasks.length=30; renderHist(); saveHist(); }
+  function updTask(id,patch){ for(var i=0;i<state.tasks.length;i++){ if(state.tasks[i].id===id){
+    for(var k in patch) state.tasks[i][k]=patch[k]; break; } } renderHist(); saveHist(); }
+
+  function renderHist(){
+    var a=$('histArea');
+    if(!state.tasks.length){ a.innerHTML='<div class="task-empty" style="padding:28px 10px"><div class="t">暂无记录</div></div>'; return; }
+    var h='<div class="hist-list">';
+    state.tasks.forEach(function(t,i){
+      var b,c;
+      if(t.status==='completed'){ b='已完成'; c='ok'; }
+      else if(t.status==='deleted'){ b='已删除'; c=''; }
+      else if(t.status==='failed'){ b='失败'; c='fail'; }
+      else { b='生成中'; c='run'; }
+      h+='<div class="hist-item" data-i="'+i+'"><div class="hist-thumb">'+(taskKind(t)==='image'?'图':(t.url?'▷':'…'))+'</div>'+
+        '<div class="hist-body"><div class="hist-prompt">'+esc(t.prompt||'(无描述)')+'</div>'+
+        '<div class="hist-sub">'+taskMeta(t)+' · '+fmtTime(t.created)+
+        (t.bytes?' · '+fmtBytes(t.bytes):'')+'</div></div>'+
+        '<span class="hist-badge '+c+'">'+b+'</span></div>';
+    });
+    h+='</div>'; a.innerHTML=h;
+    a.querySelectorAll('.hist-item').forEach(function(el){
+      el.onclick=function(){ showTask(state.tasks[+el.dataset.i]); };
+    });
+  }
+
+  async function showTask(t){
+    var area=$('taskArea'); $('taskHint').textContent=t.id||'';
+    var view=++state.viewToken, label=kindLabel(t), isImage=taskKind(t)==='image';
+    clearTimeout(state.mediaTimer);
+    if(t.status==='completed'&&t.url){
+      area.innerHTML='<div class="prog-note">'+label+'已生成，正在连接媒体服务…</div>';
+      try{await mediaSession();}catch(e){if(view!==state.viewToken)return;area.innerHTML='<div class="prog-note err">'+esc(e.message)+' 文件已保存，请恢复连接后重新打开这条历史记录。</div>';setStatus('off','连接中断');return;}
+      if(view!==state.viewToken)return;
+      var abs=new URL(t.url, location.origin);
+      if(abs.origin!==location.origin || !abs.pathname.startsWith('/v1/media/')) { toast('无效的媒体地址'); return; }
+      // HEAD checks current server state before rendering a cached history URL.
+      // This does not regenerate the task or expose a key in the URL.
+      var checkController=new AbortController(),checkTimer=setTimeout(function(){checkController.abort();},15000);
+      try{
+        var check=await fetch(abs.href,{method:'HEAD',headers:headers(),signal:checkController.signal});
+        if(view!==state.viewToken)return;
+        if(check.status===404){updTask(t.id,{status:'deleted',url:'',bytes:0});showTask(findTask(t.id)||Object.assign({},t,{status:'deleted'}));return;}
+        if(!check.ok)throw new Error('HTTP '+check.status);
+      }catch(e){if(view===state.viewToken)area.innerHTML='<div class="prog-note err">无法读取文件，请检查连接后重新打开这条历史记录。</div>';return;}
+      finally{clearTimeout(checkTimer);}
+      abs=esc(abs.href);
+      area.innerHTML=(isImage?'<img class="result-image" src="'+abs+'" alt="生成的图片">':'<video src="'+abs+'" controls playsinline preload="metadata"></video>')+
+        '<div class="result-meta"><div class="meta-txt">'+taskMeta(t)+
+        (t.bytes?' · '+fmtBytes(t.bytes):'')+'</div><div class="result-actions">'+
+        '<a href="'+abs+'" download target="_blank" rel="noopener"><button class="btn btn-ghost">下载'+label+'</button></a>'+
+        '<a href="'+abs+'" target="_blank" rel="noopener"><button class="btn btn-ghost">新窗口打开</button></a>'+
+        '</div></div><div class="prog-note" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">'+
+        esc(t.prompt||'')+'</div><div class="prog-note err" id="playbackFeedback" role="status"></div>';
+      var media=area.querySelector(isImage?'img.result-image':'video'), feedback=$('playbackFeedback');
+      var loaded=function(){return isImage?media.complete&&media.naturalWidth>0:media.readyState>0;};
+      media.onerror=function(){feedback.textContent=label+'读取失败，请检查 SSH 隧道或尝试下载。已生成文件会保留。';};
+      media[isImage?'onload':'onloadedmetadata']=function(){clearTimeout(state.mediaTimer);feedback.textContent='';};
+      state.mediaTimer=setTimeout(function(){if(!loaded())feedback.textContent=label+'加载较慢，请检查 SSH 隧道。恢复连接后可重新打开这条历史记录，无需再次生成。';},15000);
+      return;
+    }
+    if(t.status==='deleted'){
+      area.innerHTML='<div class="prog-head"><span class="prog-status">文件已删除</span></div><div class="prog-note">此文件已从服务器移除，无法继续预览或下载。电脑上已下载的副本不受影响。</div><div class="prog-note">'+esc(t.prompt||'')+'</div>';
+      return;
+    }
+    if(t.status==='failed'){
+      area.innerHTML='<div class="prog-head"><span class="prog-status" style="color:var(--err)">生成失败</span></div>'+
+        '<div class="prog-note err">'+esc(t.err||'未知错误')+'</div>'+
+        '<div class="prog-note" style="margin-top:12px">'+esc(t.prompt||'')+'</div>';
+      return;
+    }
+    var pct=t.progress||0;
+    area.innerHTML='<div class="prog-head"><span class="prog-status">'+(pct>=100?'正在保存':'生成中')+
+      '</span><span class="prog-pct">'+pct+'%</span></div>'+
+      '<div class="bar"><i style="width:'+Math.max(pct,4)+'%"></i></div>'+
+      '<div class="prog-note">'+label+'生成需要一些时间，请保持页面打开。文件会自动保存在管理台。</div>'+
+      '<div class="prog-note" style="margin-top:12px">'+esc(t.prompt||'')+'</div>';
+  }
+
+  function stopPolling(){ if(state.timer){ clearInterval(state.timer); state.timer=null; } }
+  function startPolling(id){ stopPolling(); state.taskId=id; state.timer=setInterval(function(){ poll(id); }, POLL_MS); poll(id); }
+
+  function findTask(id){ return state.tasks.find(function(t){return t.id===id;}); }
+
+  async function poll(id){
+    if(state.polling)return;
+    var task=findTask(id);if(!task)return;
+    state.polling=true;
+    var controller=new AbortController(),timeout=setTimeout(function(){controller.abort();},15000);
+    try{
+      var r=await fetch(api((taskKind(task)==='image'?'/v1/images/tasks/':'/v1/videos/')+encodeURIComponent(id)),{headers:headers(),signal:controller.signal});
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      var j=await r.json();
+      var status=j.status, pct=(typeof j.progress==='number')?j.progress:0;
+      var patch={status:status,progress:pct};
+      if(status==='deleted'){
+        stopPolling();setBusy(false);updTask(id,{status:'deleted',url:'',bytes:0});showTask(findTask(id));return;
+      }
+      if(status==='completed'||status==='succeeded'){
+        var res=j.result||(j.data&&j.data[0])||{};
+        patch.status='completed'; patch.url=res.url||j.url||''; patch.bytes=res.bytes||res.size||0;
+        stopPolling(); setBusy(false); updTask(id,patch);
+        showTask(findTask(id));
+        toast(kindLabel(task)+'生成完成'); return;
+      }
+      if(status==='failed'||status==='error'||status==='timeout'||status==='cancelled'){
+        patch.status='failed'; patch.err=j.error||'生成失败';
+        stopPolling(); setBusy(false); updTask(id,patch);
+        showTask(findTask(id));
+        return;
+      }
+      updTask(id,patch);
+      showTask(findTask(id));
+    }catch(e){setStatus('off','查询中断，正在重试');}
+    finally{clearTimeout(timeout);state.polling=false;}
+  }
+
+  function setBusy(b){
+    state.busy=b; var btn=$('genBtn'); btn.disabled=b;
+    $('modeVideo').disabled=b;$('modeImage').disabled=b;
+    $('genBtnText').textContent=b?'生成中…':(state.kind==='image'?'生成图片':'生成视频');
+    if(b&&!btn.querySelector('.spinner')){
+      var sp=document.createElement('span'); sp.className='spinner'; btn.insertBefore(sp,$('genBtnText'));
+    } else if(!b){ var ex=btn.querySelector('.spinner'); if(ex) ex.remove(); }
+  }
+
+  function generate(){
+    if(state.busy) return;
+    if(!state.base||!state.key){ toast('请先在下方填写接口地址与 API Key'); return; }
+    var prompt=$('prompt').value.trim();
+    if(!prompt){ toast('请填写'+(state.kind==='image'?'图片':'视频')+'描述'); return; }
+    var kind=state.kind,size=state.size,payload={prompt:prompt,size:size};
+    if(kind==='video')payload.duration=parseInt($('duration').value,10)||5;
+    else {payload.model='muse-image';payload.response_format='url';payload.n=1;}
+    if(state.firstFrame) payload.reference_image=state.firstFrame;
+    setBusy(true);
+    fetch(api(kind==='image'?'/v1/images/tasks':'/v1/videos'),{method:'POST',headers:headers(),body:JSON.stringify(payload)})
+      .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,status:r.status,body:j}; }); })
+      .then(function(res){
+        if(!res.ok){
+          var msg=(res.body&&(res.body.error&&(res.body.error.message||res.body.error)||res.body.detail))||('HTTP '+res.status);
+          throw new Error(typeof msg==='string'?msg:JSON.stringify(msg));
+        }
+        var id=res.body.id||res.body.task_id;
+        if(!id) throw new Error('服务端未返回任务 ID');
+        state.taskId=id;
+        addTask({id:id,prompt:prompt,kind:kind,status:'queued',progress:0,size:size,
+          duration:payload.duration,created:Math.floor(Date.now()/1000),url:'',bytes:0,err:''});
+        showTask(findTask(id));
+        toast('任务已提交，正在生成…'); startPolling(id);
+      })
+      .catch(function(e){ setBusy(false); toast('提交失败：'+e.message); });
+  }
+
+  function bindDrop(){
+    var drop=$('drop'), file=$('file');
+    drop.onclick=function(e){ if(e.target.classList.contains('clear-img')) return; file.click(); };
+    file.onchange=function(){ if(file.files[0]) readFile(file.files[0]); };
+    ['dragenter','dragover'].forEach(function(ev){ drop.addEventListener(ev,function(e){ e.preventDefault(); drop.classList.add('over'); }); });
+    ['dragleave','drop'].forEach(function(ev){ drop.addEventListener(ev,function(e){ e.preventDefault(); drop.classList.remove('over'); }); });
+    drop.addEventListener('drop',function(e){
+      var f=e.dataTransfer.files[0];
+      if(f&&/^image\//.test(f.type)) readFile(f); else if(f) toast('请拖入图片文件');
+    });
+    function readFile(f){
+      if(f.size>8*1024*1024){ toast('图片不要超过 8MB'); return; }
+      var fr=new FileReader();
+      fr.onload=function(){
+        state.firstFrame=fr.result; drop.classList.add('has-img');
+        $('dropInner').innerHTML='<img src="'+fr.result+'"><button class="clear-img" type="button">×</button>';
+        drop.querySelector('.clear-img').onclick=function(e){
+          e.stopPropagation(); state.firstFrame=null; drop.classList.remove('has-img');
+          $('dropInner').innerHTML='<div class="ico">＋</div><div class="t1">点击或拖拽图片到这里</div>'+
+            '<div class="t2" id="dropHint">支持 JPG / PNG / WebP</div>';
+          if(!state.busy)setKind(state.kind);
+          file.value='';
+        };
+      };
+      fr.readAsDataURL(f);
+    }
+  }
+
+  function bind(){
+    $('modeVideo').onclick=function(){setKind('video');};
+    $('modeImage').onclick=function(){setKind('image');};
+    $('prompt').oninput=function(){ $('promptCount').textContent=$('prompt').value.length+' / 1000'; };
+    $('sizes').onclick=function(e){
+      var el=e.target.closest?e.target.closest('.size-opt'):null; if(!el) return;
+      this.querySelectorAll('.size-opt').forEach(function(o){ o.classList.remove('sel'); });
+      el.classList.add('sel'); state.size=el.dataset.size;
+    };
+    $('genBtn').onclick=generate;
+    $('saveCfg').onclick=function(){ saveCfg(); testConn(false); };
+    $('clearHist').onclick=function(){ if(state.busy){toast('请等待当前任务完成后再清空记录');return;} if(!state.tasks.length) return; state.tasks=[]; renderHist(); saveHist(); toast('历史已清空；管理台文件仍保留'); };
+    $('prompt').addEventListener('keydown',function(e){
+      if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); generate(); }
+    });
+  }
+
+  bind(); bindDrop(); loadCfg(); loadHist();
+})();
+</script>
+</body>
+</html>

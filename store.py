@@ -2,13 +2,20 @@
 from __future__ import annotations
 
 import json
+import re
 import os
+import stat
 import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
 
 _LOCK = threading.Lock()
+
+
+def valid_media_name(name: str) -> bool:
+    return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp|gif|bmp|mp4|webm|mov)", name) is not None
 
 # 决定账号生死的核心 cookie（与 engine.ESSENTIAL_COOKIES 保持一致）
 ESSENTIAL_COOKIES = ("hatch_sess", "hatch_gw", "hatch_vml",
@@ -287,6 +294,64 @@ class Store:
                 _write(self.cfg.tasks_file, self.tasks)
                 return True
             return False
+
+    def delete_media(self, name: str) -> dict:
+        """Remove one regular media file and persist tombstones for its tasks.
+
+        Persist link removal before unlinking so a metadata-write failure cannot
+        delete the file. A crash between these operations can leave an unlinked
+        task with a retained file; a repeat delete safely completes the action.
+        Callers serialize against the generator using GEN_LOCK.
+        """
+        if not valid_media_name(name):
+            raise ValueError("Invalid media name")
+        path = os.path.join(self.cfg.media_dir, name)
+        with _LOCK:
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                info = None
+            if info is not None and not stat.S_ISREG(info.st_mode):
+                raise ValueError("Only regular media files can be deleted")
+
+            def references(task):
+                result = task.get("result") or {}
+                if isinstance(result, dict) and result.get("filename") == name:
+                    return True
+                values = [task.get("url")]
+                for field in ("result", "video"):
+                    item = task.get(field)
+                    if isinstance(item, dict):
+                        values.append(item.get("url"))
+                return any(isinstance(value, str) and urlsplit(value).path == "/v1/media/" + name
+                           for value in values)
+
+            updated = dict(self.tasks)
+            affected = []
+            for tid, task in self.tasks.items():
+                if references(task):
+                    entry = dict(task)
+                    for field in ("result", "url", "video", "data"):
+                        entry.pop(field, None)
+                    entry.update(status="deleted", stage="deleted", media_deleted=True,
+                                 deleted_media=name, updated_at=int(time.time()))
+                    updated[tid] = entry
+                    affected.append(tid)
+            if affected:
+                _write(self.cfg.tasks_file, updated)
+            try:
+                if info is not None:
+                    os.unlink(path)
+            except FileNotFoundError:
+                info = None  # A simultaneous external removal is already complete.
+            except OSError:
+                if affected:
+                    _write(self.cfg.tasks_file, self.tasks)
+                raise
+            self.tasks = updated
+            return {"deleted": True, "name": name, "already_missing": info is None,
+                    "freed_bytes": info.st_size if info is not None else 0,
+                    "affected_tasks": affected}
 
     def clear_tasks(self, keep: int = 0) -> int:
         with _LOCK:

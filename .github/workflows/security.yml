@@ -1,0 +1,45 @@
+name: Security regression
+on:
+  push:
+    branches: [security/private-deployment, main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install pytest==9.1.1 httpx==0.28.1
+      - run: python -m pytest tests/test_security.py -q
+      - run: python tests/test_async_images.py
+      - run: python tests/test_vm_wait.py engine.py --assert
+      - run: docker build -t muse-security-test .
+      - name: Container boundary and browser regression
+        run: |
+          set -eu
+          docker run -d --name muse-security-test --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m --shm-size=1g \
+            -v "$PWD/tests:/tests:ro" -p 127.0.0.1:18610:18610 muse-security-test
+          trap 'docker logs muse-security-test; docker rm -f -v muse-security-test' EXIT
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:18610/readyz; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:18610/readyz
+          for path in /data/auth.json /data/accounts.json /install.conf /compose.yml /.git/config; do
+            test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18610$path")" = 404
+          done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18610/admin/accounts)" = 401
+          test "$(docker exec muse-security-test id -u)" = 10001
+          docker exec -e PYTHONPATH=/app muse-security-test python /tests/test_web_ui.py
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m --shm-size=1g \
+            -e PYTHONPATH=/app -v "$PWD/tests:/tests:ro" muse-security-test \
+            python /tests/test_media_selection.py /app/engine.py

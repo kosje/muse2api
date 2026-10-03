@@ -78,7 +78,7 @@ class Client:
 
 async def check(source, home):
     os.environ.update(MUSE2API_HOME=home, MUSE2API_PROFILE_ROOT=home,
-                      MUSE2API_KEY="test-only", MUSE2API_PUBLIC_BASE="")
+                      MUSE2API_KEY="test-only-" + "a" * 32, MUSE2API_PUBLIC_BASE="")
     sys.path.insert(0, str(source.parent))
     spec = importlib.util.spec_from_file_location("image_api_test_target", source)
     module = importlib.util.module_from_spec(spec)
@@ -98,31 +98,29 @@ async def check(source, home):
                 "kind": "image", "path": str(media)}, "fixture-account"
 
     locked_impl = module._run_generation_locked if hasattr(module, "_run_generation_locked") else None
+    module.SCHED.start()
     if locked_impl:
         def assert_owned(*args, **kwargs):
             assert module.GEN_LOCK.locked(), "browser lock must cover retry/cleanup"
             assert kwargs.get("deadline") is not None
             return {"fixture": True}, None
         module._run_generation_locked = assert_owned
-        module._run_generation("lock fixture", "image", 1)
+        module.SCHED.run_sync(lambda: module._run_generation("lock fixture", "image", 1), timeout=2)
         module._run_generation_locked = locked_impl
         assert not module.GEN_LOCK.locked()
-        real_lock = module.GEN_LOCK
-        class BusyLock:
-            def acquire(self, timeout):
-                assert timeout == 1
-                return False
-        module.GEN_LOCK = BusyLock()
+        from scheduler import QueueTimeout
+        blocked = threading.Event()
+        module.SCHED.submit(lambda: blocked.wait(2))
         try:
-            module._run_generation("queue fixture", "image", 1)
+            module.SCHED.run_sync(lambda: None, timeout=0.05)
             raise AssertionError("busy browser must time out")
-        except module.MuseGenerationError:
+        except QueueTimeout:
             pass
         finally:
-            module.GEN_LOCK = real_lock
+            blocked.set()
         print("generation_lock_covers_retry_cleanup=PASS queue_wait_bounded=PASS")
     module._run_generation = generation
-    headers = {"Authorization": "Bearer test-only"}
+    headers = {"Authorization": "Bearer test-only-" + "a" * 32}
     async with Client(module.app, headers) as client:
         # Old endpoint blocks until result; the new endpoint must acknowledge before release.
         timer = threading.Timer(0.25, release.set)
@@ -175,6 +173,15 @@ async def check(source, home):
         dedicated_id = response.json()["id"]
         done = await finish(dedicated_id)
         assert done["result"]["url"] == done["url"] and done["status"] == "completed"
+        # Workbench image tasks use the same persistent directory as the admin
+        # file list. Completion must immediately expose the result there.
+        admin_headers={"Authorization":"Bearer "+module.KEYRING.keys['admin']}
+        files_response=await client.get('/admin/media',headers=admin_headers)
+        assert files_response.status_code==200
+        listed=next(m for m in files_response.json()['media'] if m['name']==media.name)
+        assert listed['kind']=='image' and listed['url']==done['result']['url']
+        assert listed['bytes']==media.stat().st_size
+        print('image_result_in_unified_admin_media_list=PASS')
         count = len(calls)
         duplicate = await client.post("/v1/images/tasks", json=body, headers={"Idempotency-Key": "fixture-key"})
         assert duplicate.status_code == 202 and duplicate.json()["id"] == dedicated_id
