@@ -173,6 +173,15 @@ async def check(source, home):
         dedicated_id = response.json()["id"]
         done = await finish(dedicated_id)
         assert done["result"]["url"] == done["url"] and done["status"] == "completed"
+        # Workbench image tasks use the same persistent directory as the admin
+        # file list. Completion must immediately expose the result there.
+        admin_headers={"Authorization":"Bearer "+module.KEYRING.keys['admin']}
+        files_response=await client.get('/admin/media',headers=admin_headers)
+        assert files_response.status_code==200
+        listed=next(m for m in files_response.json()['media'] if m['name']==media.name)
+        assert listed['kind']=='image' and listed['url']==done['result']['url']
+        assert listed['bytes']==media.stat().st_size
+        print('image_result_in_unified_admin_media_list=PASS')
         count = len(calls)
         duplicate = await client.post("/v1/images/tasks", json=body, headers={"Idempotency-Key": "fixture-key"})
         assert duplicate.status_code == 202 and duplicate.json()["id"] == dedicated_id
