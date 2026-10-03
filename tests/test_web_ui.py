@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='muse-ui-') as tmp:
                 document.getElementById('prompt').value='fixture image description';
                 document.querySelector('[data-size="1:1"]').click();
             ''')
-            assert page.js("document.getElementById('durationField').hidden && document.getElementById('genBtnText').textContent==='生成图片'")
+            assert page.js("getComputedStyle(document.getElementById('durationField')).display==='none' && document.getElementById('genBtnText').textContent==='生成图片'")
             page.js("document.getElementById('genBtn').click()")
             for _ in range(100):
                 if page.js("Boolean(document.querySelector('#taskArea img.result-image')?.naturalWidth)"):break
