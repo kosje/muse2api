@@ -260,3 +260,96 @@ def test_cookie_helper_transport():
     for url in ('http://example.com','http://localhost.evil.example','http://10.0.0.1','https://u:p@example.com'):
         with pytest.raises(RuntimeError): helper.validate_transport(url)
     with pytest.raises(RuntimeError): helper.NoRedirect().redirect_request(None,None,302,None,None,'https://evil.example')
+
+
+@pytest.mark.parametrize('name,kind', [('delete-fixture.webp','image'),('delete-fixture.mp4','video')])
+def test_admin_deletion_removes_file_and_task_links(client,name,kind):
+    path=Path(app.CFG.media_dir)/name
+    path.write_bytes(b'fixture contents')
+    keep=Path(app.CFG.media_dir)/'keep.png';keep.write_bytes(b'keep')
+    task=app.store.create_task(kind,'fixture')
+    url='/v1/media/'+name
+    app.store.update_task(task['id'],status='completed',url=url,
+        result={'filename':name,'size':path.stat().st_size,'kind':kind,'url':url},video={'url':url})
+    assert client.head(url,headers=API).status_code==200
+    before=client.get('/admin/media',headers=ADMIN).json()['total_bytes']
+    deleted=client.delete('/admin/media/'+name,headers=ADMIN)
+    assert deleted.status_code==200 and deleted.json()['freed_bytes']==16
+    assert not path.exists() and keep.read_bytes()==b'keep'
+    assert client.get(url,headers=API).status_code==404
+    assert client.head(url,headers=API).status_code==404
+    assert client.head(url).status_code==401
+    listing=client.get('/admin/media',headers=ADMIN).json()
+    assert all(m['name']!=name for m in listing['media'])
+    assert listing['total_bytes']==before-16
+    route='/v1/images/tasks/' if kind=='image' else '/v1/videos/'
+    record=client.get(route+task['id'],headers=API).json()
+    assert record['status']=='deleted'
+    assert not any(record.get(k) for k in ['result','url','video','data'])
+    restored=app.Store(app.CFG)
+    assert restored.get_task(task['id'])['status']=='deleted'
+    repeat=client.delete('/admin/media/'+name,headers=ADMIN)
+    assert repeat.status_code==200 and repeat.json()['already_missing'] and repeat.json()['freed_bytes']==0
+
+
+def test_media_deletion_requires_admin_not_bearer_or_cookie(client):
+    path=Path(app.CFG.media_dir)/'fixture.mp4'
+    assert client.delete('/admin/media/fixture.mp4').status_code==401
+    assert client.delete('/admin/media/fixture.mp4',headers=API).status_code==403
+    client.post('/v1/media/session',headers=ADMIN)
+    assert client.delete('/admin/media/fixture.mp4').status_code==401
+    assert path.exists()
+
+
+@pytest.mark.parametrize('name',['auth.json','..%5Cauth.json','%2E%2E%2Fauth.json','.env','fixture.mp4%00','file.txt'])
+def test_delete_rejects_paths_and_nonmedia(client,name):
+    before=(Path(app.CFG.data_dir)/'accounts.json').read_bytes()
+    response=client.delete('/admin/media/'+name,headers=ADMIN)
+    assert response.status_code in (400,404)
+    assert (Path(app.CFG.data_dir)/'accounts.json').read_bytes()==before
+    assert (Path(app.CFG.media_dir)/'fixture.mp4').exists()
+
+
+def test_delete_rejects_symlinks_and_directories(client):
+    root=Path(app.CFG.media_dir)
+    (root/'folder.png').mkdir()
+    assert client.delete('/admin/media/folder.png',headers=ADMIN).status_code==400
+    target=Path(app.CFG.data_dir)/'accounts.json'
+    try:(root/'link.png').symlink_to(target)
+    except OSError:pytest.skip('Symlink creation unavailable')
+    assert client.delete('/admin/media/link.png',headers=ADMIN).status_code==400
+    assert target.exists() and (root/'link.png').is_symlink()
+    assert all(m['name']!='link.png' for m in client.get('/admin/media',headers=ADMIN).json()['media'])
+
+
+def test_delete_waits_for_generation(client):
+    with app.GEN_LOCK:
+        assert client.delete('/admin/media/fixture.mp4',headers=ADMIN).status_code==409
+    assert (Path(app.CFG.media_dir)/'fixture.mp4').exists()
+
+
+def test_delete_metadata_failure_preserves_file(client,monkeypatch):
+    import store as storage
+    task=app.store.create_task('video','fixture')
+    app.store.update_task(task['id'],status='completed',result={'filename':'fixture.mp4'})
+    def fail(*args,**kwargs):raise OSError('fixture disk failure')
+    monkeypatch.setattr(storage,'_write',fail)
+    assert client.delete('/admin/media/fixture.mp4',headers=ADMIN).status_code==500
+    assert (Path(app.CFG.media_dir)/'fixture.mp4').exists()
+    assert app.store.get_task(task['id'])['status']=='completed'
+
+
+def test_delete_unlink_failure_restores_links(client,monkeypatch):
+    import store as storage
+    path=Path(app.CFG.media_dir)/'fixture.mp4'
+    task=app.store.create_task('video','fixture')
+    app.store.update_task(task['id'],status='completed',result={'filename':path.name})
+    original_unlink=storage.os.unlink
+    def fail_only_media(p,*args,**kwargs):
+        if str(p)==str(path):raise PermissionError('fixture in use')
+        return original_unlink(p,*args,**kwargs)
+    monkeypatch.setattr(storage.os,'unlink',fail_only_media)
+    assert client.delete('/admin/media/'+path.name,headers=ADMIN).status_code==500
+    assert path.exists()
+    assert app.store.get_task(task['id'])['status']=='completed'
+    assert app.Store(app.CFG).get_task(task['id'])['status']=='completed'

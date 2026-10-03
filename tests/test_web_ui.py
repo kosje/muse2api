@@ -85,6 +85,8 @@ with tempfile.TemporaryDirectory(prefix='muse-ui-') as tmp:
         # decoding and the admin media listing use the real container service.
         fixture_path=Path('/app/data/media/workbench-fixture.png')
         fixture_path.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII='))
+        video_fixture=Path('/app/data/media/delete-fixture.mp4')
+        video_fixture.write_bytes(b'only a list fixture; never previewed')
         try:
             page.js('''window.fixturePosts=[];window.fixtureRealFetch=window.fetch;
                 window.fetch=async function(url,options){
@@ -165,6 +167,47 @@ with tempfile.TemporaryDirectory(prefix='muse-ui-') as tmp:
                 time.sleep(.1)
             assert page.js("document.getElementById('files').textContent.includes('workbench-fixture.png')"), 'Image missing in unified admin file list'
             print('PASS text/image generation controls, reference upload, image preview/download, mixed history, video regression and admin image list')
+            assert page.js("document.querySelector('#imageFiles tbody').textContent.includes('workbench-fixture.png') && document.querySelector('#videoFiles tbody').textContent.includes('delete-fixture.mp4')"), 'Media types not separated'
+            assert page.js("document.querySelectorAll('#files img,#files video').length===0"), 'Admin list still renders media previews'
+            assert page.js("!performance.getEntriesByType('resource').some(r=>/\/v1\/media\/(workbench-fixture.png|delete-fixture.mp4)/.test(r.name))"), 'Admin list downloaded preview bytes'
+            page.js("window.confirm=()=>false;document.querySelector('#imageFiles .delete-media').click()")
+            assert fixture_path.exists(), 'Cancelled deletion changed file'
+            page.js("window.confirm=()=>true;window.deleteRealFetch=window.fetch;window.fetch=(url,options)=>options?.method==='DELETE'&&url.startsWith('/admin/media/')?Promise.resolve(new Response(JSON.stringify({detail:'fixture delete failed'}),{status:500,headers:{'Content-Type':'application/json'}})):deleteRealFetch(url,options);document.querySelector('#imageFiles .delete-media').click()")
+            for _ in range(50):
+                if page.js("document.getElementById('mediaMessage').textContent.includes('fixture delete failed')"):break
+                time.sleep(.1)
+            assert fixture_path.exists() and page.js("!document.querySelector('#imageFiles .delete-media').disabled")
+            page.js("window.fetch=deleteRealFetch;document.querySelector('#imageFiles .delete-media').click()")
+            for _ in range(100):
+                if page.js("!document.querySelector('#imageFiles .delete-media')"):break
+                time.sleep(.1)
+            assert not fixture_path.exists(), 'Delete button did not unlink server image'
+            assert video_fixture.exists(), 'Image deletion removed unrelated video'
+            page.js("document.querySelector('#videoFiles .delete-media').click()")
+            for _ in range(100):
+                if page.js("!document.querySelector('#videoFiles .delete-media')"):break
+                time.sleep(.1)
+            assert not video_fixture.exists(), 'Delete button did not unlink server video'
+            page.send('Page.reload')
+            for _ in range(100):
+                if page.js("Boolean(document.getElementById('media'))"):break
+                time.sleep(.1)
+            page.js("document.getElementById('media').click()")
+            for _ in range(100):
+                if page.js("document.getElementById('mediaMessage').textContent.includes('还没有生成文件')"):break
+                time.sleep(.1)
+            assert page.js("document.getElementById('mediaMessage').textContent.includes('还没有生成文件')")
+            page.send('Page.navigate',{'url':'http://127.0.0.1:18610/'})
+            for _ in range(100):
+                if page.js("document.querySelectorAll('.hist-item').length===3"):break
+                time.sleep(.1)
+            page.js("document.querySelectorAll('.hist-item')[1].click()")
+            for _ in range(100):
+                if page.js("document.getElementById('taskArea').textContent.includes('文件已删除')"):break
+                time.sleep(.1)
+            assert page.js("document.getElementById('taskArea').textContent.includes('文件已删除') && !document.querySelector('#taskArea a[download]')"), 'Deleted file retained download link'
+            print('PASS separate media lists without previews, cancel/error handling, physical image/video deletion, refresh persistence and deleted history')
         finally:
             fixture_path.unlink(missing_ok=True)
+            video_fixture.unlink(missing_ok=True)
     finally:engine.stop()

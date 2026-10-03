@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field
 from config import CFG
 from engine import ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError
 from scheduler import ST_DONE, ST_FAILED, ST_QUEUED, ST_RUNNING, ST_TIMEOUT, Scheduler
-from store import Store, account_expiry, min_expiry
+from store import Store, account_expiry, min_expiry, valid_media_name
 from security import Keyring
 
 import sys
@@ -1617,10 +1617,11 @@ def media_session(request: Request, role=Depends(auth)):
 
 
 @app.get("/v1/media/{name}")
+@app.head("/v1/media/{name}")
 def get_media(name: str, request: Request):
     if not KEYRING.role(request.headers.get("authorization")) and not KEYRING.valid_media_ticket(request.cookies.get("muse_media")):
         raise HTTPException(401, "Media authentication required")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp|gif|bmp|mp4|webm|mov)", name):
+    if not valid_media_name(name):
         raise HTTPException(400, "Invalid media name")
     p = os.path.join(CFG.media_dir, name)
     if os.path.islink(p) or not os.path.isfile(p):
@@ -1942,14 +1943,34 @@ def admin_media(_=Depends(admin_auth)):
     if os.path.isdir(d):
         for name in os.listdir(d):
             p = os.path.join(d, name)
-            if not os.path.isfile(p):
+            if not valid_media_name(name) or os.path.islink(p) or not os.path.isfile(p):
+                continue
+            try:
+                info = os.stat(p)
+            except FileNotFoundError:
                 continue
             ext = os.path.splitext(name)[1].lower()
-            items.append({"name": name, "url": media_url(name), "bytes": os.path.getsize(p),
-                          "mtime": int(os.path.getmtime(p)),
+            items.append({"name": name, "url": media_url(name), "bytes": info.st_size,
+                          "mtime": int(info.st_mtime),
                           "kind": "video" if ext in (".mp4", ".webm", ".mov") else "image"})
     items.sort(key=lambda x: x["mtime"], reverse=True)
-    return {"media": items, "count": len(items)}
+    return {"media": items, "count": len(items), "total_bytes": sum(item["bytes"] for item in items)}
+
+
+@app.delete("/admin/media/{name}")
+def delete_media(name: str, _=Depends(admin_auth)):
+    if not valid_media_name(name):
+        raise HTTPException(400, "无效的媒体文件名")
+    if not GEN_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "有任务正在生成，请等待完成后再删除文件。")
+    try:
+        return store.delete_media(name)
+    except ValueError:
+        raise HTTPException(400, "只能删除生成目录中的普通图片或视频文件") from None
+    except OSError:
+        raise HTTPException(500, "文件删除未完成，请刷新列表确认后重试。") from None
+    finally:
+        GEN_LOCK.release()
 
 
 # ------------------------- 前端页面 -------------------------

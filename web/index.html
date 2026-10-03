@@ -301,6 +301,7 @@
     state.tasks.forEach(function(t,i){
       var b,c;
       if(t.status==='completed'){ b='已完成'; c='ok'; }
+      else if(t.status==='deleted'){ b='已删除'; c=''; }
       else if(t.status==='failed'){ b='失败'; c='fail'; }
       else { b='生成中'; c='run'; }
       h+='<div class="hist-item" data-i="'+i+'"><div class="hist-thumb">'+(taskKind(t)==='image'?'图':(t.url?'▷':'…'))+'</div>'+
@@ -325,6 +326,16 @@
       if(view!==state.viewToken)return;
       var abs=new URL(t.url, location.origin);
       if(abs.origin!==location.origin || !abs.pathname.startsWith('/v1/media/')) { toast('无效的媒体地址'); return; }
+      // HEAD checks current server state before rendering a cached history URL.
+      // This does not regenerate the task or expose a key in the URL.
+      var checkController=new AbortController(),checkTimer=setTimeout(function(){checkController.abort();},15000);
+      try{
+        var check=await fetch(abs.href,{method:'HEAD',headers:headers(),signal:checkController.signal});
+        if(view!==state.viewToken)return;
+        if(check.status===404){updTask(t.id,{status:'deleted',url:'',bytes:0});showTask(findTask(t.id)||Object.assign({},t,{status:'deleted'}));return;}
+        if(!check.ok)throw new Error('HTTP '+check.status);
+      }catch(e){if(view===state.viewToken)area.innerHTML='<div class="prog-note err">无法读取文件，请检查连接后重新打开这条历史记录。</div>';return;}
+      finally{clearTimeout(checkTimer);}
       abs=esc(abs.href);
       area.innerHTML=(isImage?'<img class="result-image" src="'+abs+'" alt="生成的图片">':'<video src="'+abs+'" controls playsinline preload="metadata"></video>')+
         '<div class="result-meta"><div class="meta-txt">'+taskMeta(t)+
@@ -338,6 +349,10 @@
       media.onerror=function(){feedback.textContent=label+'读取失败，请检查 SSH 隧道或尝试下载。已生成文件会保留。';};
       media[isImage?'onload':'onloadedmetadata']=function(){clearTimeout(state.mediaTimer);feedback.textContent='';};
       state.mediaTimer=setTimeout(function(){if(!loaded())feedback.textContent=label+'加载较慢，请检查 SSH 隧道。恢复连接后可重新打开这条历史记录，无需再次生成。';},15000);
+      return;
+    }
+    if(t.status==='deleted'){
+      area.innerHTML='<div class="prog-head"><span class="prog-status">文件已删除</span></div><div class="prog-note">此文件已从服务器移除，无法继续预览或下载。电脑上已下载的副本不受影响。</div><div class="prog-note">'+esc(t.prompt||'')+'</div>';
       return;
     }
     if(t.status==='failed'){
@@ -370,6 +385,9 @@
       var j=await r.json();
       var status=j.status, pct=(typeof j.progress==='number')?j.progress:0;
       var patch={status:status,progress:pct};
+      if(status==='deleted'){
+        stopPolling();setBusy(false);updTask(id,{status:'deleted',url:'',bytes:0});showTask(findTask(id));return;
+      }
       if(status==='completed'||status==='succeeded'){
         var res=j.result||(j.data&&j.data[0])||{};
         patch.status='completed'; patch.url=res.url||j.url||''; patch.bytes=res.bytes||res.size||0;
